@@ -14,11 +14,13 @@ on which git host / auth this project ends up wired to.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
+import _paths  # noqa: F401  (section-a on sys.path)
 from pipeline_models import PipelineConfig
 from run_pipeline import run_pipeline
-from sandbox_client import LocalSandboxClient
+from sandbox_client import LocalSandboxClient, NebiusSandboxClient
 
 
 def main() -> None:
@@ -28,9 +30,15 @@ def main() -> None:
     parser.add_argument("--diff-file", required=True, help="path to a file containing the PR's unified diff")
     parser.add_argument("--changed-files", required=True, help="comma-separated list of changed .py files")
     parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument("--sandbox", choices=["local", "nebius"], default="local",
+                        help="local: plain subprocess, NO isolation (trusted code only). "
+                             "nebius: contree CLI, needs `contree auth` first (unverified end to end)")
     parser.add_argument("--sandbox-cwd", default="/tmp/_pipeline_sandbox", help="LocalSandboxClient working dir")
-    parser.add_argument("--repo-path", default="checked_out_repo", help="relative path inside the sandbox; "
-                         "see KNOWN_ISSUES.md before using an absolute path with LocalSandboxClient")
+    parser.add_argument("--repo-path", default="checked_out_repo",
+                        help="where the repo is cloned inside the sandbox (relative to --sandbox-cwd, or absolute)")
+    parser.add_argument("--install-deps", action="store_true",
+                        help="pip-install pytest, coverage and requirements.txt in the sandbox after checkout; "
+                             "with --sandbox local this installs into the current interpreter")
     parser.add_argument("--output", default=None, help="write the markdown report here; default: stdout")
     args = parser.parse_args()
 
@@ -38,9 +46,11 @@ def main() -> None:
         diff = f.read()
     changed_py_files = [f.strip() for f in args.changed_files.split(",") if f.strip()]
 
-    import os
-    os.makedirs(args.sandbox_cwd, exist_ok=True)
-    sandbox = LocalSandboxClient(cwd=args.sandbox_cwd)
+    if args.sandbox == "nebius":
+        sandbox = NebiusSandboxClient()
+    else:
+        os.makedirs(args.sandbox_cwd, exist_ok=True)
+        sandbox = LocalSandboxClient(cwd=args.sandbox_cwd)
 
     result = run_pipeline(
         sandbox=sandbox,
@@ -50,6 +60,7 @@ def main() -> None:
         changed_py_files=changed_py_files,
         config=PipelineConfig(max_attempts_per_gap=args.max_attempts),
         repo_path=args.repo_path,
+        install_deps=args.install_deps,
     )
 
     if args.output:

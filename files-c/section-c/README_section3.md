@@ -60,32 +60,13 @@ hand-built fixtures standing in for a real run:**
 - The real Section 2 generator — `generator_stub.py` stands in for it.
   Swapping it in is the one-line change noted in `run_pipeline.py`'s import.
 
-## A real bug found during integration (not mine, not patched silently)
+## Fixed since the Oct 14 audit
 
-`LocalSandboxClient.read_file()` / `write_file()` (in `sandbox_client.py`)
-string-concatenate `self.cwd + "/" + path` unconditionally. `run()`
-doesn't have this problem — it just does `cd <path>` inside a subprocess,
-which works fine with an absolute path. So an absolute `repo_path` works
-for every `sandbox.run(...)` call in `verifier.py` but silently breaks the
-`sandbox.read_file(...)` calls in the same function, producing a doubled,
-nonexistent path (`FileNotFoundError`, not a wrong-but-plausible result —
-at least it fails loudly).
-
-**Workaround used here:** `demo_pipeline.py` passes a `repo_path` that's
-relative to the sandbox's `cwd` (`"checked_out_repo"`, not an absolute tmp
-path), which sidesteps the inconsistency entirely. `cli.py` defaults to
-the same relative-path convention and flags it in `--help`.
-
-**Not an issue for `NebiusSandboxClient`** — its `write_file`/`read_file`
-never locally prefix the path with anything, they just shell out, so an
-absolute `repo_path` is fine there.
-
-**Suggested real fix for whoever owns `sandbox_client.py`:** make
-`LocalSandboxClient.read_file`/`write_file` handle an absolute `path` the
-same way `os.path.join` would (i.e. don't prefix if `path` is already
-absolute), so both implementations accept either relative or absolute
-`repo_path` consistently. Left to Section 1 to fix rather than patched
-here, since `sandbox_client.py` isn't this section's file.
+- Absolute `repo_path` with `LocalSandboxClient`: fixed in Section 1 (`os.path.join`).
+- Rerunning into the same sandbox dir: `checkout_repo` now does `rm -rf` before cloning.
+- Timeouts: every sandbox call has one (Section 1); a looping candidate becomes `fail`.
+- `cli.py --sandbox {local,nebius}` and `--install-deps` (calls `verifier.prepare_env`).
+- Section 1 files are imported from `../section-a` via `_paths.py`; no copies here.
 
 ## Known gaps / next steps
 
@@ -93,9 +74,6 @@ here, since `sandbox_client.py` isn't this section's file.
    existing suite) is threaded through `run_pipeline()`'s signature but
    `demo_pipeline.py` passes an empty list — nobody's wired up "pull a
    few existing test files from the repo" yet.
-2. No timeout wrapping around `sandbox.run()` calls — a hung sandbox
-   command currently hangs the whole pipeline. Worth adding before this
-   runs unattended against arbitrary PRs.
-3. `run_gaps_in_parallel` needs per-gap sandbox session isolation (a
+2. `run_gaps_in_parallel` needs per-gap sandbox session isolation (a
    separate scratch filename, or a session-per-gap sandbox) before it's
    safe to implement — see the `NotImplementedError` in `run_pipeline.py`.

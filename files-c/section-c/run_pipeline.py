@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import time
 
+import _paths  # noqa: F401  (section-a on sys.path)
 from generator_stub import generate_test  # <-- swap for Section 2's real module when ready
 from models import CandidateTest, Gap
 from pipeline_models import GapRecord, PipelineConfig, PipelineResult
 from sandbox_client import SandboxClient
-from verifier import find_gaps, verify_test
+from verifier import find_gaps, prepare_env, verify_test
 
 
 def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: str) -> None:
@@ -44,7 +45,10 @@ def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: st
     clone/checkout rather than any file-upload API, consistent with
     sandbox_client.py's documented approach (upload/`contree cp` syntax is
     unconfirmed, so nothing here depends on it)."""
-    result = sandbox.run(f"git clone --quiet {repo_url} {repo_path} && cd {repo_path} && git checkout --quiet {ref}")
+    # rm -rf first: a rerun into the same sandbox otherwise fails with
+    # "destination path already exists" (audit R6/E7).
+    result = sandbox.run(f"rm -rf {repo_path} && git clone --quiet {repo_url} {repo_path} "
+                         f"&& cd {repo_path} && git checkout --quiet {ref}")
     if not result.ok:
         raise RuntimeError(f"failed to check out {repo_url}@{ref} into sandbox:\n{result.stderr[-2000:]}")
 
@@ -96,18 +100,24 @@ def run_pipeline(
     example_tests: list[str] | None = None,
     config: PipelineConfig | None = None,
     repo_path: str = "/tmp/_pipeline_repo",
+    install_deps: bool = False,
 ) -> PipelineResult:
     """
     Entry point. repo_url/ref are used to check the PR head out inside the
     sandbox (step the real find_gaps() explicitly leaves to the caller).
     diff and changed_py_files are passed straight through to find_gaps(),
     matching verifier.py's real signature exactly.
+    install_deps: run verifier.prepare_env() after checkout (pip-installs pytest,
+    coverage and requirements.txt). Leave False for LocalSandboxClient unless
+    you are inside a throwaway venv -- it installs into the host interpreter.
     """
     config = config or PipelineConfig()
     example_tests = example_tests or []
     start = time.monotonic()
 
     checkout_repo(sandbox, repo_path, repo_url, ref)
+    if install_deps:
+        prepare_env(sandbox, repo_path)
 
     gaps = find_gaps(sandbox, repo_path, diff, changed_py_files)
 

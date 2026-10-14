@@ -60,3 +60,31 @@ network + pytest installed, before you trust it on a real PR:**
    deliberately avoided rather than guessed at. If you find the real
    syntax in the CLI reference, it's a safe, isolated addition; nothing
    else here depends on it.
+
+## Changes after the Oct 14 audit
+
+Fixes for audit findings B1, B2, B3, B5, B7, B8, B11, B12, B14 (see the audit report for
+the evidence behind each). Tests: `python -m pytest -q test_section1.py` (30 tests, fake
+sandbox; 3 are POSIX-only and skip on Windows).
+
+Re-run against real pytest 9.1.1 + coverage 7.16.2 (WSL Ubuntu, Python 3.14), all pass:
+E1 (re-running the covered branch is now rejected), E3 (all three path layouts find gaps),
+E4b (an unimported new module is now reported), E4c (one gap, not two), E5 (absolute
+paths), E6 (the ModuleNotFoundError is in the message), E8 (0/6 wrong rejections), the
+real `exit` branch token, and a `while True` candidate (times out as `fail`).
+Not run: anything against Nebius.
+
+`LocalSandboxClient` needs a POSIX shell. On Windows it raises; run the pipeline in WSL.
+
+- `Gap.missing_branches` (defaulted): partial_branch gaps now carry coverage.py's missing
+  branches, and `verify_test` accepts a candidate only if it takes one of them.
+- `compute_gaps` / `parse_coverage_xml` take the XML *text*, not a path. No /tmp files.
+- Report paths are matched to diff paths by exact name, then longest path-suffix. A `.py`
+  file in `changed_py_files` that is absent from the coverage report raises.
+- Coverage runs with `--source=.`; the candidate run sets PYTHONDONTWRITEBYTECODE=1.
+- All sandbox calls take `timeout` (default 120 s); timeout returns code 124.
+- `prepare_env()` installs pytest, coverage and requirements.txt. Section 3 calls it when
+  `run_pipeline(..., install_deps=True)` / `cli.py --install-deps`.
+- Deliberately unchanged: a red existing suite still aborts `find_gaps` (fail fast), now
+  with the real pytest output in the message.
+- `smoke_nebius.py` collects the evidence still missing for the Nebius client.

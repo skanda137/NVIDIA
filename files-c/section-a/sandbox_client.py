@@ -37,10 +37,16 @@ confirm nothing above has changed — it's a beta product, weeks old.
 
 from __future__ import annotations
 
+import os
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from typing import Protocol
+
+
+DEFAULT_TIMEOUT = 120      # seconds; generated tests can loop forever
+TIMEOUT_RETURNCODE = 124   # same code GNU `timeout` uses
 
 
 @dataclass
@@ -55,12 +61,12 @@ class CommandResult:
 
 
 class SandboxClient(Protocol):
-    def run(self, command: str) -> CommandResult:
+    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         """Run a shell command in the sandbox's current session (persists
         filesystem state for the next call, like a real shell)."""
         ...
 
-    def run_disposable(self, command: str) -> CommandResult:
+    def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         """Run a shell command without advancing/mutating session state."""
         ...
 
@@ -84,26 +90,42 @@ class LocalSandboxClient:
     """
 
     def __init__(self, cwd: str):
+        # verifier.py's commands are POSIX shell (env-var prefixes, rm -f, [ -f ]).
+        # Under cmd.exe they fail, and every candidate would be silently rejected.
+        if os.name != "posix":
+            raise RuntimeError("LocalSandboxClient needs a POSIX shell; on Windows run it inside WSL")
         self.cwd = cwd
 
-    def run(self, command: str) -> CommandResult:
-        proc = subprocess.run(
+    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
+        # Popen + own process group so a timeout kills the whole tree: with
+        # shell=True, killing only the shell leaves the child running and
+        # communicate() then blocks on its open pipes.
+        proc = subprocess.Popen(
             command, shell=True, cwd=self.cwd,
-            capture_output=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=(os.name == "posix"),
         )
-        return CommandResult(proc.stdout, proc.stderr, proc.returncode)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+            out, err = proc.communicate()
+            return CommandResult(out or "", (err or "") + f"\n[timed out after {timeout}s]", TIMEOUT_RETURNCODE)
+        return CommandResult(out, err, proc.returncode)
 
-    def run_disposable(self, command: str) -> CommandResult:
-        return self.run(command)
+    def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
+        return self.run(command, timeout)
 
     def write_file(self, path: str, content: str) -> CommandResult:
-        full_path = f"{self.cwd}/{path}"
-        with open(full_path, "w") as f:
+        with open(os.path.join(self.cwd, path), "w") as f:  # join keeps an absolute `path` as is
             f.write(content)
         return CommandResult("", "", 0)
 
     def read_file(self, path: str) -> str:
-        with open(f"{self.cwd}/{path}") as f:
+        with open(os.path.join(self.cwd, path)) as f:
             return f.read()
 
 
@@ -118,20 +140,23 @@ class NebiusSandboxClient:
         self.profile = profile
         self._booted = False
 
-    def _contree(self, args: str, disposable: bool = False) -> CommandResult:
+    def _contree(self, args: str, disposable: bool = False, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         flag = "-D " if disposable else ""
         full_cmd = f"contree --profile={self.profile} run {flag}{args}"
-        proc = subprocess.run(
-            full_cmd, shell=True, capture_output=True, text=True,
-        )
+        try:
+            proc = subprocess.run(
+                full_cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult("", f"[contree call timed out after {timeout}s]", TIMEOUT_RETURNCODE)
         return CommandResult(proc.stdout, proc.stderr, proc.returncode)
 
-    def run(self, command: str) -> CommandResult:
+    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         # Quoted so the remote shell sees one argument, not contree's own flags.
-        return self._contree(f"-- bash -c {shlex.quote(command)}")
+        return self._contree(f"-- bash -c {shlex.quote(command)}", timeout=timeout)
 
-    def run_disposable(self, command: str) -> CommandResult:
-        return self._contree(f"-- bash -c {shlex.quote(command)}", disposable=True)
+    def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
+        return self._contree(f"-- bash -c {shlex.quote(command)}", disposable=True, timeout=timeout)
 
     def write_file(self, path: str, content: str) -> CommandResult:
         # Heredoc trick: no upload API needed, just a shell command.

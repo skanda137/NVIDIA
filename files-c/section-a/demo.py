@@ -65,7 +65,7 @@ COVERAGE_XML = '''<?xml version="1.0" ?>
           <lines>
             <line number="1" hits="1"/>
             <line number="4" hits="1"/>
-            <line number="5" hits="1" branch="true" condition-coverage="50% (1/2)"/>
+            <line number="5" hits="1" branch="true" condition-coverage="50% (1/2)" missing-branches="8"/>
             <line number="6" hits="1"/>
             <line number="8" hits="0" branch="false"/>
             <line number="9" hits="0" branch="false"/>
@@ -100,13 +100,10 @@ def main():
     print("  OK: correctly resolves nested line numbers to the right function\n")
 
     # ---- real pipeline code under test ----
-    with open("/tmp/demo_coverage.xml", "w") as f:
-        f.write(COVERAGE_XML)
-
     print("=== 3. compute_gaps(): the actual output find_gaps() returns ===")
     gaps = compute_gaps(
         diff_text=DIFF,
-        coverage_xml_path="/tmp/demo_coverage.xml",
+        coverage_xml=COVERAGE_XML,
         file_sources={"billing.py": BILLING_SOURCE},
     )
     for g in gaps:
@@ -119,6 +116,7 @@ def main():
     uncovered_fn = next(g for g in uncovered if g.start_line == 13)
 
     assert partial.start_line == 5 and partial.function_context == "calculate_discount"
+    assert partial.missing_branches == ("5:8",), partial.missing_branches
     assert uncovered_else.end_line == 9 and uncovered_else.function_context == "calculate_discount"
     assert uncovered_fn.end_line == 14 and uncovered_fn.function_context == "log_non_member_purchase"
     print("\nOK: found exactly the three gaps a human reviewer would flag --")

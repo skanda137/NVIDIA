@@ -1,45 +1,29 @@
-# Verified Test-Gap Agent — team delivery package
+# Verified Test-Gap Agent — code layout
 
-Status at the time of this zip:
+| Section | Folder | Owns | Status (2026-10-14) |
+|---|---|---|---|
+| 1 | `section-a/` | `models.py`, `find_gaps`, `verify_test`, sandbox clients | Audit fixes in; passes against real pytest + coverage locally. Nebius client never run. |
+| 2 | `section-b/` | `generate_test` (Nemotron) | **The `.py` files are 0 bytes.** The only `generate_test` is `section-c/generator_stub.py`. |
+| 3 | `section-c/` | `run_pipeline`, retry loop, report, CLI | Works with the stub generator. |
 
-| Section | Owns | Status |
-|---|---|---|
-| A | `find_gaps`, `verify_test`, sandbox execution | **empty — awaiting your files**, see `section-a/README.md` for the contract and one known bug to fix |
-| B | `generate_test` (Nemotron) | **empty — awaiting your files**, see `section-b/README.md` for the contract |
-| C | orchestration (`run_pipeline`), retry loop, rendering, CLI | **complete**, see `section-c/README_section3.md` |
+`section-a/` is the single source of truth for Section 1. Section 3 imports it through
+`section-c/_paths.py`, which puts `section-a/` on `sys.path`. Do not copy Section 1 files
+into other folders.
 
-## How to assemble the full pipeline once A and B land
+## Run
 
-Drop Section A's files and Section B's files into `section-a/` and
-`section-b/` respectively (flat, replacing the placeholder README), then
-either put all three folders' `.py` files on one `PYTHONPATH` or flatten
-them into one directory — `section-c/run_pipeline.py` imports `models`,
-`sandbox_client`, `verifier` (Section A) and `generate_test` from a
-`generator_stub`-shaped module (Section B) by plain module name, not by
-package path, matching how the three of you have been developing so far.
+Linux, macOS or WSL (the local sandbox needs a POSIX shell):
 
-## Section C, what's already proven
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install pytest coverage
+cd files-c/section-a && python -m pytest -q test_section1.py && python demo.py
+cd ../section-c && python demo_pipeline.py
+```
 
-`section-c/demo_pipeline.py` runs the **entire** orchestration end-to-end
-against real `git`, real `pytest`, and real `coverage` (not hand-built
-fixtures) — using Section A's actual `find_gaps`/`verify_test` code
-(included in `section-c/` as the versions Section C last integrated
-against, purely so the demo is runnable standalone right now) and a
-deterministic stand-in for Section B's `generate_test`. It proves:
+`demo_pipeline.py` builds a toy git repo and runs the whole loop: real `git clone`, real
+pytest and coverage, gap finding, the retry loop, and the markdown report. Only
+`generate_test` is a stub.
 
-- gap-finding agrees with Section A's own demo (same 3 gaps)
-- the retry loop actually recovers from a real pytest failure, not a
-  scripted one
-- a test that passes but never touches the gap's lines is correctly
-  rejected, not counted as verified — the project's core claim
-
-Run it yourself: `cd section-c && python3 demo_pipeline.py`
-
-**Note:** the `models.py` / `coverage_diff.py` / `verifier.py` /
-`sandbox_client.py` / `demo.py` copies currently sitting in `section-c/`
-are Section A's, not Section C's — kept there only so this zip runs
-out of the box before `section-a/` is filled in. Once you drop your real
-files into `section-a/`, those copies in `section-c/` should be deleted
-and `section-c/`'s imports pointed at `section-a/` instead (or the two
-folders flattened together), so there's only one source of truth for
-Section A's code.
+To point it at a real repo, use `section-c/cli.py --help`. `--sandbox local` runs
+generated code on your machine with no isolation.

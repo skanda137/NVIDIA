@@ -10,6 +10,7 @@ gap/test/verification.
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+import _paths  # noqa: F401  (section-a on sys.path)
 from models import CandidateTest, Gap, VerificationResult
 
 GapFinalStatus = Literal["verified_pass", "exhausted", "skipped_error"]

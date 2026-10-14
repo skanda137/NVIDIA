@@ -20,12 +20,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+import _paths  # noqa: F401  (section-a on sys.path)
 from pipeline_models import PipelineConfig
 from run_pipeline import run_pipeline
 from sandbox_client import LocalSandboxClient
 
 
-def build_fixture_repo(tmp_dir: Path) -> tuple[str, str]:
+def build_fixture_repo(tmp_dir: Path) -> tuple[str, str, str]:
     """Builds the same toy PR Section 1's demo.py uses (billing.py gaining
     calculate_discount(), member path tested, member=False path and the
     new helper function left untested) -- but as a REAL git repo with two
@@ -78,14 +79,7 @@ def main() -> None:
         # checkout_repo() clones to an absolute repo_path regardless, same
         # as it would against NebiusSandboxClient.
         sandbox = LocalSandboxClient(cwd=str(tmp_path))
-        # NOTE: must be relative to sandbox cwd, not absolute -- see
-        # KNOWN_ISSUES.md. LocalSandboxClient.run() tolerates an absolute
-        # repo_path (it just does `cd <path>` in a subprocess), but
-        # read_file()/write_file() string-concatenate cwd+path unconditionally,
-        # so an absolute path there produces a doubled, broken path. Using a
-        # relative path here sidesteps it; NebiusSandboxClient doesn't have
-        # this inconsistency since its read_file/write_file never locally
-        # prefix anything.
+        # Relative to the sandbox cwd; absolute paths also work now (audit B11 fixed).
         repo_path = "checked_out_repo"
 
         print(f"=== Checking out PR {pr_sha[:8]} into sandbox, running pytest+coverage for real ===")

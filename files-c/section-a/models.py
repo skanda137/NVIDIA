@@ -21,6 +21,11 @@ class Gap:
     end_line: int              # 1-indexed, inclusive
     function_context: str      # enclosing function/method name, "" if module-level
     reason: GapReason          # "uncovered" = never executed, "partial_branch" = one side of an if/else never taken
+    # partial_branch only: the branches coverage.py reported as never taken, as
+    # "<line>:<destination>" strings (destination is a line number or "exit").
+    # verify_test accepts a candidate only if it takes at least one of these.
+    # Defaulted, so positional construction of the five contract fields still works.
+    missing_branches: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         loc = f"{self.file}:{self.start_line}" if self.start_line == self.end_line \
