@@ -16,7 +16,7 @@ Linux, macOS or WSL (the local sandbox needs a POSIX shell):
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install pytest coverage
+pip install -r requirements.txt
 cd files-c/section-a && python -m pytest -q test_section1.py && python demo.py
 cd ../section-c && python demo_pipeline.py
 ```

@@ -65,7 +65,9 @@ hand-built fixtures standing in for a real run:**
 - Absolute `repo_path` with `LocalSandboxClient`: fixed in Section 1 (`os.path.join`).
 - Rerunning into the same sandbox dir: `checkout_repo` now does `rm -rf` before cloning.
 - Timeouts: every sandbox call has one (Section 1); a looping candidate becomes `fail`.
-- `cli.py --sandbox {local,nebius}` and `--install-deps` (calls `verifier.prepare_env`).
+- `cli.py --sandbox {local,nebius}` and `--install-deps` (calls `verifier.prepare_env`). With
+  `--sandbox local` it refuses to run outside a virtualenv, since it pip-installs into the
+  current interpreter (`test_cli.py`).
 - Section 1 files are imported from `../section-a` via `_paths.py`; no copies here.
 
 ## Known gaps / next steps
