@@ -1,0 +1,21 @@
+# virtualenvs
+.venv/
+venv/
+env/
+.venvs/
+# caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+# scratch and sandbox
+_scratch_*
+_pipeline_sandbox/
+# secrets
+.env*
+# stale audit artifact
+AUDIT_REPORT.md
