@@ -42,6 +42,10 @@ def main() -> None:
     parser.add_argument("--output", default=None, help="write the markdown report here; default: stdout")
     args = parser.parse_args()
 
+    if args.install_deps and args.sandbox == "local" and sys.prefix == sys.base_prefix:
+        parser.error("--install-deps with --sandbox local pip-installs into the current interpreter; "
+                     "refusing outside a virtualenv. Activate a venv first, or use --sandbox nebius.")
+
     with open(args.diff_file) as f:
         diff = f.read()
     changed_py_files = [f.strip() for f in args.changed_files.split(",") if f.strip()]
