@@ -19,3 +19,4 @@ _pipeline_sandbox/
 .env*
 # stale audit artifact
 AUDIT_REPORT.md
+!.env.example
