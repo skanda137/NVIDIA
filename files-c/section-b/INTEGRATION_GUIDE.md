@@ -162,7 +162,7 @@ generate_test(gap, example_tests, attempt=1, prior_failure=None, *, source=None,
 4. Lint: it must parse, contain a `test_*` function, and avoid `subprocess`, `socket`, `requests`, `urllib`, `http`, `httpx`, `shutil`, `ctypes`, `eval`, `exec`, `__import__`, `os.system` and similar. If lint fails, one automatic repair request is sent.
 5. Return a `CandidateTest`.
 
-**Setup:** `pip install openai pytest coverage`, then `export NVIDIA_API_KEY=nvapi-...` (a key from build.nvidia.com).
+**Setup:** `pip install openai pytest coverage`, then set ONE key: `TOKEN_FACTORY_API_KEY` (Nebius Token Factory, base URL `https://api.tokenfactory.nebius.com/v1/`) or `NVIDIA_API_KEY` (build.nvidia.com). If `TOKEN_FACTORY_API_KEY` is set it wins, and the three tier models are discovered from the provider's model list (Nemotron ids matched by 'nano' / 'super' / 'ultra', else by parameter count). Run `python list_models.py` to see the assignment, override with the `NEMOTRON_*_MODEL` variables, then `python live_pipeline.py` for the full pipeline with the real model. Never paste or commit the key.
 
 **What Section 2 needs from the others**
 
