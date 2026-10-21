@@ -13,9 +13,9 @@ Files:
 - `pipeline_models.py` — `GapRecord` / `PipelineResult` / `PipelineConfig`,
   the shapes Section 3 owns. `Gap` / `CandidateTest` / `VerificationResult`
   are imported from Section 1's `models.py`, never redefined.
-- `generator_stub.py` — stands in for Section 2's `generate_test()`.
-  Matches Section 2's expected signature exactly, so swapping in the real
-  module is a one-line import change in `run_pipeline.py`.
+- `generator_stub.py` — offline stand-in for Section 2's `generate_test()`,
+  same signature. `run_pipeline()` uses Section 2's real generator by default;
+  the demo and `cli.py --generator stub` pass the stub as `generate=`.
 - `run_pipeline.py` — the orchestration loop itself, plus `checkout_repo()`
   (cloning the PR head into the sandbox, which `verifier.find_gaps()`'s
   own docstring says is this section's job, not Section 1's).
@@ -57,8 +57,8 @@ hand-built fixtures standing in for a real run:**
   rather than silently racing; see the comment in `run_pipeline.py` for why
   (concurrent gaps could step on each other's shared `_scratch_verify_test.py`
   inside one evolving sandbox session).
-- The real Section 2 generator — `generator_stub.py` stands in for it.
-  Swapping it in is the one-line change noted in `run_pipeline.py`'s import.
+- A live run of Section 2's generator through this loop. The wiring is tested
+  offline (`test_pipeline_integration.py`, fake LLM, real git/pytest/coverage).
 
 ## Fixed since the Oct 14 audit
 
@@ -70,10 +70,9 @@ hand-built fixtures standing in for a real run:**
 
 ## Known gaps / next steps
 
-1. `example_tests` (for giving `generate_test()` style examples from the
-   existing suite) is threaded through `run_pipeline()`'s signature but
-   `demo_pipeline.py` passes an empty list — nobody's wired up "pull a
-   few existing test files from the repo" yet.
+1. `example_tests`: when not passed, `collect_example_tests()` reads up to 3
+   `test_*.py` files from the checked-out repo (sorted; `_scratch_*` and hidden
+   dirs skipped). It takes the first 3 by path, not the most relevant ones.
 2. `run_gaps_in_parallel` needs per-gap sandbox session isolation (a
    separate scratch filename, or a session-per-gap sandbox) before it's
    safe to implement — see the `NotImplementedError` in `run_pipeline.py`.

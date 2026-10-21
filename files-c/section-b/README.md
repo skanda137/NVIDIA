@@ -1,37 +1,30 @@
-# Section B — Test generation (Nemotron) (EMPTY — awaiting submission)
-
-This folder is a placeholder. Drop your files in here directly (flat, no
-subfolder) before the group tries to run the full pipeline.
-
-## Contract to implement
+# Section B — Test generation (Nemotron on Nebius Token Factory)
 
 ```python
 def generate_test(gap: Gap, example_tests: list[str], attempt: int = 1,
-                   prior_failure: str | None = None) -> CandidateTest
+                  prior_failure: str | None = None, *, source: str | None = None,
+                  llm=None) -> CandidateTest
 ```
 
-`Gap` and `CandidateTest` come from Section A's `models.py` — import them,
-don't redefine them.
+`Gap` and `CandidateTest` come from Section A's `models.py` through `_paths.py`
+(identical to `section-c/_paths.py`); there is no fallback copy.
 
-- `gap` — where to write a test (file, line range, enclosing function,
-  why it's a gap: fully uncovered vs. a half-tested branch).
-- `example_tests` — existing test snippets from the repo, for style/pattern
-  matching. Section C's orchestrator currently always passes `[]` here —
-  nobody has wired up "pull a few real tests from the repo" yet, so that's
-  an open gap on the orchestration side too, not just something to consume.
-- `attempt` / `prior_failure` — on a retry, `prior_failure` carries the
-  previous attempt's real pytest failure message (stdout/stderr tail), so
-  the generator can actually react to *why* the last candidate didn't
-  verify, not just blindly retry the same thing.
+- **Provider:** Nebius Token Factory only, via the `openai` SDK. Needs
+  `TOKEN_FACTORY_API_KEY` and `TOKEN_FACTORY_BASE_URL`; raises if either is unset.
+- **Tiers:** attempt 1 uses `TOKEN_FACTORY_MODEL_NANO`, attempt 2 `_SUPER`, attempt 3+
+  `_ULTRA`. No model ID is hardcoded; an unset tier variable raises.
+  `scripts/check_token_factory.py` picks the IDs from the live `/models` list with
+  `discover_tier_models` (keyword match only).
+- **Prompt:** the enclosing function's source (from `source`, which Section C reads from
+  the sandbox), up to 3 example tests from the repo, `prior_failure` verbatim on retries,
+  and for `partial_branch` gaps each `Gap.missing_branches` entry in words.
+- **Output:** `<think>` blocks and prose stripped, the fenced code extracted, then linted
+  (syntax, a `test_*` function, no subprocess/socket/requests/urllib/eval/exec/... ).
+  One repair round; if the code still fails lint, `CandidateRejected` (a `ValueError`)
+  is raised and Section C records the attempt as failed.
+- **Tests:** `python -m pytest -q -p no:cacheprovider files-c/section-b`. `conftest.py`
+  clears `TOKEN_FACTORY_*` and makes the OpenAI client constructor raise, so no unit
+  test can reach the network.
 
-## What Section C's stand-in does today
-
-`section-c/generator_stub.py` is a deterministic placeholder matching this
-exact signature, used so the orchestration loop is demoable before a real
-generator exists. It hand-writes correct tests for two known gap shapes
-(proving the happy path) and, for one gap, deliberately returns a broken
-candidate on attempt 1 and a fixed one on attempt 2 using `prior_failure`
-(proving the retry path against a real pytest failure, not a canned one).
-
-Swapping in your real implementation should be a one-line import change in
-`section-c/run_pipeline.py` — see the comment next to the import there.
+`section-c/generator_stub.py` keeps the same signature for offline demos
+(`demo_pipeline.py`, `cli.py --generator stub`).
