@@ -6,10 +6,9 @@ to understand, and the only function this project's entry point calls.
 
 What this does NOT own (imported, not reimplemented):
   - find_gaps / verify_test              -- Section 1 (verifier.py)
-  - generate_test                        -- Section 2 (generator_stub.py
-                                             until the real one lands;
-                                             see the import line below,
-                                             it's the only line that changes)
+  - generate_test                        -- Section 2 (section-b/generator.py;
+                                             generator_stub.py is passed in
+                                             as `generate=` for offline demos)
   - Gap / CandidateTest / VerificationResult -- Section 1 (models.py)
 
 What this file owns:
@@ -21,19 +20,21 @@ What this file owns:
   3. Aggregating per-gap outcomes into one PipelineResult.
   4. Handing the result to render.py for the human-facing report.
 
-Swap point for Section 2: when the real generator exists, change only the
-import below from `generator_stub` to the real module. Nothing else in this
-file needs to change -- that's the point of building against the shared
+Generator: Section 2's generate_test by default. Anything with the same
+signature can be passed as `generate=` (the stub, or generate_test with a
+fake llm in tests) -- that's the point of building against the shared
 models.py contract.
 """
 
 from __future__ import annotations
 
+import shlex
 import time
+from typing import Callable
 
-import _paths  # noqa: F401  (section-a on sys.path)
-from generator_stub import generate_test  # <-- swap for Section 2's real module when ready
-from models import CandidateTest, Gap
+import _paths  # noqa: F401  (section-a and section-b on sys.path)
+from generator import CandidateRejected, generate_test
+from models import CandidateTest, Gap, VerificationResult
 from pipeline_models import GapRecord, PipelineConfig, PipelineResult
 from sandbox_client import SandboxClient
 from verifier import find_gaps, prepare_env, verify_test
@@ -53,21 +54,47 @@ def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: st
         raise RuntimeError(f"failed to check out {repo_url}@{ref} into sandbox:\n{result.stderr[-2000:]}")
 
 
+def collect_example_tests(sandbox: SandboxClient, repo_path: str, limit: int = 3) -> list[str]:
+    """Up to `limit` existing test_*.py files from the checked-out repo (sorted, hidden
+    dirs and _scratch_* skipped), as style examples for the generator."""
+    result = sandbox.run(
+        f"cd {shlex.quote(repo_path)} && find . -type f -name 'test_*.py' "
+        f"-not -name '_scratch_*' -not -path '*/.*' | sort"
+    )
+    if not result.ok:
+        raise RuntimeError(f"listing example tests failed:\n{result.stderr[-2000:]}")
+    paths = [p for p in result.stdout.splitlines() if p.strip()][:limit]
+    return [sandbox.read_file(f"{repo_path}/{p[2:] if p.startswith('./') else p}") for p in paths]
+
+
 def _run_gap(
     gap: Gap,
     sandbox: SandboxClient,
     repo_path: str,
     example_tests: list[str],
     config: PipelineConfig,
+    generate: Callable[..., CandidateTest],
 ) -> GapRecord:
     """The retry loop for a single gap: generate -> verify -> retry on fail."""
     record = GapRecord(gap=gap)
     prior_failure: str | None = None
+    source = sandbox.read_file(f"{repo_path}/{gap.file}")  # once per gap; failures raise
 
     for attempt in range(1, config.max_attempts_per_gap + 1):
-        candidate: CandidateTest = generate_test(
-            gap, example_tests, attempt=attempt, prior_failure=prior_failure,
-        )
+        try:
+            candidate: CandidateTest = generate(
+                gap, example_tests, attempt=attempt, prior_failure=prior_failure, source=source,
+            )
+        except CandidateRejected as exc:
+            # Lint still failed after Section 2's repair round: count it as a
+            # failed attempt (never sent to the sandbox) and feed the reason back.
+            record.attempts.append(CandidateTest(code=exc.code, target_gap=gap,
+                                                 model_tier_used=exc.tier, attempt_number=attempt))
+            rejected = VerificationResult(status="fail", coverage_hit=False,
+                                          message=f"generated code rejected before running: {'; '.join(exc.problems)}")
+            record.verifications.append(rejected)
+            prior_failure = rejected.message
+            continue
         record.attempts.append(candidate)
 
         verification = verify_test(sandbox, repo_path, candidate)
@@ -101,6 +128,7 @@ def run_pipeline(
     config: PipelineConfig | None = None,
     repo_path: str = "/tmp/_pipeline_repo",
     install_deps: bool = False,
+    generate: Callable[..., CandidateTest] = generate_test,
 ) -> PipelineResult:
     """
     Entry point. repo_url/ref are used to check the PR head out inside the
@@ -110,14 +138,17 @@ def run_pipeline(
     install_deps: run verifier.prepare_env() after checkout (pip-installs pytest,
     coverage and requirements.txt). Leave False for LocalSandboxClient unless
     you are inside a throwaway venv -- it installs into the host interpreter.
+    example_tests: None = collect up to 3 test_*.py files from the checked-out repo.
+    generate: Section 2's generate_test, or anything with its signature.
     """
     config = config or PipelineConfig()
-    example_tests = example_tests or []
     start = time.monotonic()
 
     checkout_repo(sandbox, repo_path, repo_url, ref)
     if install_deps:
         prepare_env(sandbox, repo_path)
+    if example_tests is None:
+        example_tests = collect_example_tests(sandbox, repo_path, limit=3)
 
     gaps = find_gaps(sandbox, repo_path, diff, changed_py_files)
 
@@ -135,7 +166,7 @@ def run_pipeline(
         )
 
     for gap in gaps:
-        records.append(_run_gap(gap, sandbox, repo_path, example_tests, config))
+        records.append(_run_gap(gap, sandbox, repo_path, example_tests, config, generate))
 
     tests_generated = sum(len(r.attempts) for r in records)
     tests_verified_pass = sum(1 for r in records if r.final_status == "verified_pass")

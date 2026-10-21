@@ -27,8 +27,9 @@ def _render_gap_section(record: GapRecord) -> str:
         lines.append(record.best_candidate.code.rstrip())
         lines.append("```")
     else:
+        flagged = "**Flagged for human review**: " if record.final_status == "exhausted" else ""
         lines.append(
-            f"No passing, gap-covering test found after {len(record.attempts)} attempt(s)."
+            f"{flagged}No passing, gap-covering test found after {len(record.attempts)} attempt(s)."
         )
         if record.last_verification:
             lines.append(f"Last result: **{record.last_verification.status}** -- {record.last_verification.message}")

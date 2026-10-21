@@ -7,7 +7,8 @@ network access, so it runs the REAL thing end to end: a real local git
 repo, a real `git clone` into a sandbox working directory, a real
 `pytest` + `coverage` run, real gap-finding via Section 1's unmodified
 verifier.find_gaps(), and a real retry loop via run_pipeline(). Only
-generate_test() is stubbed (Section 2's deliverable doesn't exist yet) --
+generate_test() is stubbed (generator_stub, so the demo runs offline with no
+credentials; cli.py --generator llm uses Section 2's Nemotron generator) --
 everything else below is the actual pipeline code, not a mock.
 
 Run: python3 demo_pipeline.py
@@ -20,7 +21,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-import _paths  # noqa: F401  (section-a on sys.path)
+import _paths  # noqa: F401  (section-a and section-b on sys.path)
+import generator_stub
 from pipeline_models import PipelineConfig
 from run_pipeline import run_pipeline
 from sandbox_client import LocalSandboxClient
@@ -91,6 +93,7 @@ def main() -> None:
             changed_py_files=["billing.py"],  # test_billing.py is the test file itself, not a gap target
             config=PipelineConfig(max_attempts_per_gap=2),
             repo_path=repo_path,
+            generate=generator_stub.generate_test,  # offline demo: canned tests, no LLM
         )
 
         print(f"\ngaps_found={result.gaps_found} "

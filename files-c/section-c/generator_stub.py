@@ -32,6 +32,8 @@ def generate_test(
     example_tests: list[str],
     attempt: int = 1,
     prior_failure: str | None = None,
+    *,
+    source: str | None = None,  # accepted for signature parity with Section 2; unused
 ) -> CandidateTest:
     if gap.function_context == "calculate_discount" and gap.reason == "partial_branch":
         code = (

@@ -54,6 +54,6 @@ class PipelineResult:
 
 @dataclass
 class PipelineConfig:
-    max_attempts_per_gap: int = 2
+    max_attempts_per_gap: int = 3
     model_tier: str = "nemotron-nano"
     run_gaps_in_parallel: bool = False  # keep False until verify_test is confirmed thread-safe in a real sandbox
