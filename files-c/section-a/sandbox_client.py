@@ -49,6 +49,14 @@ DEFAULT_TIMEOUT = 120      # seconds; generated tests can loop forever
 TIMEOUT_RETURNCODE = 124   # same code GNU `timeout` uses
 
 
+def scrubbed_env() -> dict[str, str]:
+    """os.environ minus anything secret-looking, for every child process: generated
+    tests run here and must not be able to read API keys."""
+    return {k: v for k, v in os.environ.items()
+            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET"))
+            and not k.upper().startswith(("NEBIUS", "TOKEN_FACTORY"))}
+
+
 @dataclass
 class CommandResult:
     stdout: str
@@ -101,7 +109,7 @@ class LocalSandboxClient:
         # shell=True, killing only the shell leaves the child running and
         # communicate() then blocks on its open pipes.
         proc = subprocess.Popen(
-            command, shell=True, cwd=self.cwd,
+            command, shell=True, cwd=self.cwd, env=scrubbed_env(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             start_new_session=(os.name == "posix"),
         )
@@ -145,7 +153,7 @@ class NebiusSandboxClient:
         full_cmd = f"contree --profile={self.profile} run {flag}{args}"
         try:
             proc = subprocess.run(
-                full_cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                full_cmd, shell=True, capture_output=True, text=True, timeout=timeout, env=scrubbed_env(),
             )
         except subprocess.TimeoutExpired:
             return CommandResult("", f"[contree call timed out after {timeout}s]", TIMEOUT_RETURNCODE)
