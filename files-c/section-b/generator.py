@@ -287,9 +287,11 @@ BANNED_CALLS = {"eval", "exec", "__import__"}
 
 def _has_oracle(func) -> bool:
     """An assert statement, pytest.raises/warns, or an assert* call (self.assertEqual,
-    mock.assert_called_once_with) anywhere in the test function."""
+    mock.assert_called_once_with) anywhere in the test function. `assert True`,
+    `assert 1` and other constant asserts do not count: a test that runs the gap
+    and asserts a constant passes the coverage check while checking nothing."""
     for node in ast.walk(func):
-        if isinstance(node, ast.Assert):
+        if isinstance(node, ast.Assert) and not isinstance(node.test, ast.Constant):
             return True
         if isinstance(node, ast.Call):
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
@@ -310,7 +312,8 @@ def lint_candidate(code: str) -> list[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             has_test = True
             if not _has_oracle(node):
-                problems.append(f"{node.name} has no assert or pytest.raises: it checks nothing")
+                problems.append(f"{node.name} has no assert (constant asserts don't count) "
+                                "or pytest.raises: it checks nothing")
         elif isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.split(".")[0] in BANNED_MODULES:

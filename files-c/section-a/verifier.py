@@ -7,6 +7,8 @@ directory is an implementation detail they shouldn't need to know about.
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 import xml.etree.ElementTree as ET
 
 from coverage_diff import compute_gaps, find_coverage_key, parse_coverage_xml
@@ -16,10 +18,12 @@ from sandbox_client import TIMEOUT_RETURNCODE, SandboxClient
 # --source=. : measure every .py under the repo root, so (a) report paths are
 # relative to the repo root like diff paths, and (b) a new module no test
 # imports still appears in the report (0% instead of missing).
-# python3 -m coverage, not a bare `coverage`: the same interpreter prepare_env
-# installs into with `python3 -m pip`.
-COVERAGE_RUN = "python3 -m coverage run --branch --source=. -m pytest -q"
-COVERAGE_RUN_CMD = f"{COVERAGE_RUN} && python3 -m coverage xml -o coverage.xml"
+# PYTHON is the interpreter running this pipeline, not whatever `python3` is on
+# PATH: an unactivated `~/.venvs/vtga/bin/python cli.py` must still find pytest.
+# LocalSandboxClient binds its sys.prefix read-only inside bwrap.
+PYTHON = shlex.quote(sys.executable)
+COVERAGE_RUN = f"{PYTHON} -m coverage run --branch --source=. -m pytest -q"
+COVERAGE_RUN_CMD = f"{COVERAGE_RUN} && {PYTHON} -m coverage xml -o coverage.xml"
 
 SUITE_TIMEOUT = 300       # seconds, whole existing suite
 CANDIDATE_TIMEOUT = 120   # seconds, one generated test file
@@ -33,8 +37,8 @@ SCRATCH_XML = "_scratch_coverage.xml"
 # so a correct retry was rejected 4/6 times (audit E8; 0/6 with this set).
 # -p no:cacheprovider: no .pytest_cache churn between candidates.
 CANDIDATE_RUN_CMD = (
-    f"PYTHONDONTWRITEBYTECODE=1 python3 -m coverage run --branch --source=. -m pytest -q "
-    f"-p no:cacheprovider {SCRATCH_TEST} && python3 -m coverage xml -o {SCRATCH_XML}"
+    f"PYTHONDONTWRITEBYTECODE=1 {PYTHON} -m coverage run --branch --source=. -m pytest -q "
+    f"-p no:cacheprovider {SCRATCH_TEST} && {PYTHON} -m coverage xml -o {SCRATCH_XML}"
 )
 
 _HAS_TEST_FN = re.compile(r"\bdef\s+test_\w+")
@@ -47,8 +51,8 @@ def prepare_env(sandbox: SandboxClient, repo_path: str) -> None:
     host venv stays read-only.
     Raises on any failure. A repo without requirements.txt gets only the two tools."""
     result = sandbox.run(
-        f"cd {repo_path} && python3 -m pip install -q pytest coverage "
-        f"&& {{ [ ! -f requirements.txt ] || python3 -m pip install -q -r requirements.txt; }}",
+        f"cd {repo_path} && {PYTHON} -m pip install -q pytest coverage "
+        f"&& {{ [ ! -f requirements.txt ] || {PYTHON} -m pip install -q -r requirements.txt; }}",
         timeout=INSTALL_TIMEOUT, network=True,
     )
     if not result.ok:

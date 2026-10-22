@@ -2,7 +2,13 @@
 Minimal CLI entry point for run_pipeline(), for anyone who wants to point
 this at a real PR instead of the fixture in demo_pipeline.py.
 
-    python3 cli.py --repo-url <git-url> --ref <sha-or-branch> --diff-file <path-to-diff.txt>
+    python3 cli.py --pr-url https://github.com/<owner>/<repo>/pull/<n>
+    python3 cli.py --repo-url <git-url-or-path> --ref <head> --base-ref <base>
+    python3 cli.py --repo-url <git-url-or-path> --ref <head> --diff-file <pr.diff>
+
+--pr-url reads the head SHA, clone URL and diff from the public GitHub REST API
+(no auth: public repos, 60 requests/hour). --base-ref diffs base...ref inside
+the sandbox's clone, so it works for local paths and remote URLs alike.
 
 --changed-files defaults to every .py file the diff adds lines to, minus test
 files (test_*.py, *_test.py, conftest.py).
@@ -13,24 +19,25 @@ _SUPER / _ULTRA (one per attempt tier), from the environment or the repo-root
 .env. --generator stub is the offline placeholder from generator_stub.py
 (canned tests for the billing fixture only).
 
-For a real GitHub PR you'd typically fetch the diff via `gh pr diff` / the
-GitHub API first, then pass it here --
-that fetching step is intentionally left out of this file since it depends
-on which git host / auth this project ends up wired to.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
+import shlex
 import sys
+import urllib.error
+import urllib.request
 
 import _paths  # noqa: F401  (section-a and section-b on sys.path)
 import generator
 import generator_stub
 from coverage_diff import changed_lines_by_file
 from pipeline_models import PipelineConfig
-from run_pipeline import run_pipeline
+from run_pipeline import checkout_repo, run_pipeline
 from sandbox_client import LocalSandboxClient
 
 
@@ -45,11 +52,51 @@ def changed_py_files_from_diff(diff: str) -> list[str]:
                   if lines and f.endswith(".py") and not is_test_file(f))
 
 
+PR_URL = re.compile(r"https://github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)/?$")
+
+
+def _github_get(url: str, accept: str) -> bytes:
+    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "verified-test-gap-agent"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:  # 404: no such PR or a private repo; 403: rate limit
+        raise RuntimeError(f"GitHub API {url}: HTTP {e.code} {e.reason}") from None
+
+
+def fetch_pr(pr_url: str) -> tuple[str, str, str]:
+    """(clone_url, head_sha, unified diff) of a public GitHub PR."""
+    m = PR_URL.match(pr_url)
+    if not m:
+        raise ValueError(f"not a GitHub PR URL: {pr_url} (want https://github.com/<owner>/<repo>/pull/<n>)")
+    api = "https://api.github.com/repos/{}/{}/pulls/{}".format(*m.groups())
+    pr = json.loads(_github_get(api, "application/vnd.github+json"))
+    if pr["head"]["repo"] is None:
+        raise ValueError(f"{pr_url}: the PR's head repository was deleted, nothing to clone")
+    diff = _github_get(api, "application/vnd.github.diff").decode("utf-8")
+    return pr["head"]["repo"]["clone_url"], pr["head"]["sha"], diff
+
+
+def diff_from_base_ref(sandbox, repo_path: str, repo_url: str, ref: str, base_ref: str) -> str:
+    """Clone repo_url@ref into the sandbox and diff base_ref...HEAD there (offline).
+    base_ref may be a SHA, a local branch, or a branch that only exists as origin/<name>."""
+    checkout_repo(sandbox, repo_path, repo_url, ref)
+    path = shlex.quote(repo_path)
+    base, remote_base = shlex.quote(f"{base_ref}...HEAD"), shlex.quote(f"origin/{base_ref}...HEAD")
+    result = sandbox.run(f"cd {path} && {{ git diff {base} 2>/dev/null || git diff {remote_base}; }}")
+    if not result.ok:
+        raise RuntimeError(f"git diff {base_ref}...{ref} failed:\n{result.stderr[-2000:]}")
+    return result.stdout
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the verified test-gap agent against a PR diff.")
-    parser.add_argument("--repo-url", required=True, help="git URL or local path to clone")
-    parser.add_argument("--ref", required=True, help="commit SHA or branch to check out (the PR head)")
-    parser.add_argument("--diff-file", required=True, help="path to a file containing the PR's unified diff")
+    parser.add_argument("--repo-url", help="git URL or local path to clone (not with --pr-url)")
+    parser.add_argument("--ref", help="commit SHA or branch to check out, the PR head (not with --pr-url)")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--pr-url", help="public GitHub PR: repo, head and diff all come from the API")
+    source.add_argument("--base-ref", help="diff BASE_REF...REF inside the sandbox clone")
+    source.add_argument("--diff-file", help="path to a file containing the PR's unified diff")
     parser.add_argument("--changed-files", default=None,
                         help="comma-separated .py files to analyse; default: the non-test .py files in the diff")
     parser.add_argument("--max-attempts", type=int, default=PipelineConfig.max_attempts_per_gap)
@@ -67,6 +114,10 @@ def main() -> None:
                              "after checkout (with network)")
     parser.add_argument("--output", default=None, help="write the markdown report here; default: stdout")
     args = parser.parse_args()
+    if args.pr_url and (args.repo_url or args.ref):
+        parser.error("--pr-url sets the repo and head itself; drop --repo-url/--ref")
+    if not args.pr_url and not (args.repo_url and args.ref):
+        parser.error("--repo-url and --ref are required unless --pr-url is given")
 
     if args.generator == "llm":
         generator.load_env_file()
@@ -78,19 +129,25 @@ def main() -> None:
     else:
         generate = generator_stub.generate_test
 
-    with open(args.diff_file) as f:
-        diff = f.read()
+    os.makedirs(args.sandbox_cwd, exist_ok=True)
+    # A local repo path must be visible read-only inside bwrap for git clone.
+    ro_paths = [args.repo_url] if args.repo_url and os.path.isdir(args.repo_url) else []
+    sandbox = LocalSandboxClient(cwd=args.sandbox_cwd, ro_paths=ro_paths)
+
+    if args.pr_url:
+        args.repo_url, args.ref, diff = fetch_pr(args.pr_url)
+        print(f"PR head {args.ref[:8]} from {args.repo_url}", file=sys.stderr)
+    elif args.base_ref:
+        diff = diff_from_base_ref(sandbox, args.repo_path, args.repo_url, args.ref, args.base_ref)
+    else:
+        with open(args.diff_file) as f:
+            diff = f.read()
     if args.changed_files is None:
         changed_py_files = changed_py_files_from_diff(diff)
         print(f"Analysing {len(changed_py_files)} file(s) from the diff: {', '.join(changed_py_files)}",
               file=sys.stderr)
     else:
         changed_py_files = [f.strip() for f in args.changed_files.split(",") if f.strip()]
-
-    os.makedirs(args.sandbox_cwd, exist_ok=True)
-    # A local repo path must be visible read-only inside bwrap for git clone.
-    ro_paths = [args.repo_url] if os.path.isdir(args.repo_url) else []
-    sandbox = LocalSandboxClient(cwd=args.sandbox_cwd, ro_paths=ro_paths)
 
     result = run_pipeline(
         sandbox=sandbox,

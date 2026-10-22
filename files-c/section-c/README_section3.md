@@ -62,6 +62,7 @@ hand-built fixtures standing in for a real run:**
 - Rerunning into the same sandbox dir: `checkout_repo` now does `rm -rf` before cloning.
 - Timeouts: every sandbox call has one (Section 1); a looping candidate becomes `fail`.
 - `cli.py --install-deps` (calls `verifier.prepare_env`, with network, into the workdir).
+- `cli.py --pr-url` / `--base-ref`: no hand-made diff file or SHA lookup needed.
 - Section 1 files are imported from `../section-a` via `_paths.py`; no copies here.
 
 ## Known gaps / next steps

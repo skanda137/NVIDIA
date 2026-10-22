@@ -173,7 +173,19 @@ def test_lint_flags_problems():
     assert g.lint_candidate("def test_a(:\n")[0].startswith("SyntaxError")
     assert "no function" in g.lint_candidate("x = 1")[0]
     assert any("subprocess" in p for p in g.lint_candidate("import subprocess\ndef test_a(): pass"))
-    assert g.lint_candidate("def test_a():\n    assert True") == []
+    assert g.lint_candidate("def test_a():\n    assert f() == 1") == []
+
+
+NO_ORACLE = "test_a has no assert (constant asserts don't count) or pytest.raises: it checks nothing"
+
+
+@pytest.mark.parametrize("body", ["    f()\n    assert True", "    assert 1", "    assert 'ok'", "    assert None"])
+def test_lint_rejects_constant_assert(body):
+    assert g.lint_candidate(f"def test_a():\n{body}") == [NO_ORACLE]
+
+
+def test_lint_constant_assert_beside_real_one_is_fine():
+    assert g.lint_candidate("def test_a():\n    assert True\n    assert f() == 1") == []
 
 
 @pytest.mark.parametrize("body", [
@@ -188,7 +200,7 @@ def test_lint_accepts_any_oracle(body):
 
 def test_lint_rejects_test_without_oracle():
     problems = g.lint_candidate("def test_a():\n    f(1)\n\ndef test_b():\n    assert f(2)")
-    assert problems == ["test_a has no assert or pytest.raises: it checks nothing"]
+    assert problems == [NO_ORACLE]
 
 
 def test_module_path_hint():

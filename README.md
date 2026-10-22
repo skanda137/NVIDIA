@@ -40,9 +40,13 @@ Against your own repo, with Nemotron on Nebius Token Factory (the default `--gen
 cp .env.example .env                    # then fill in the key; .env is gitignored
 python scripts/check_token_factory.py   # lists Nemotron IDs and the tier picks
 cd files-c/section-c
-git -C /path/to/repo diff main...feature > /tmp/pr.diff
-python cli.py --repo-url /path/to/repo --ref feature --diff-file /tmp/pr.diff
+python cli.py --pr-url https://github.com/<owner>/<repo>/pull/<n>        # public GitHub PR
+python cli.py --repo-url /path/to/repo --ref feature --base-ref main      # any git repo
 ```
+
+`--pr-url` takes the head SHA, clone URL and diff from the GitHub REST API (public repos,
+no auth). `--base-ref` diffs `main...feature` inside the sandbox's clone. `--diff-file`
+still accepts a saved unified diff.
 
 `cli.py` and `check_token_factory.py` read the `TOKEN_FACTORY_*` lines of the repo-root
 `.env`; variables already exported win. Thinking is switched off on every call
