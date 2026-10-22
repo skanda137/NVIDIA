@@ -13,18 +13,18 @@ Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic Engineering 
 | Part | State |
 |---|---|
 | Gap finding + verification (`files-c/section-a`) | Works against real pytest + coverage on toy repos |
-| Test generation with Nemotron on Nebius Token Factory (`files-c/section-b`) | In the repo; unit-tested with a fake LLM; live run pending |
+| Test generation with Nemotron on Nebius Token Factory (`files-c/section-b`) | Unit-tested with a fake LLM; live run on the demo fixture verified 3/3 gaps (2026-10-22) |
 | Orchestration, retry loop, report, CLI (`files-c/section-c`) | Works with the stub and with the generator driven by a fake LLM |
-| Nebius sandbox | Client written, never run against Nebius |
+| Sandbox (`bwrap`) | Read-only root, private `/tmp`, no network, host home and Windows drives hidden; tested |
 
 ## Quick start
 
-Requires Python 3.10+ and git, on Linux, macOS or WSL. The local sandbox needs a POSIX
-shell.
+Requires Python 3.10+, git and bubblewrap (`sudo apt install bubblewrap`), on Linux or
+WSL2. Every repo and generated-test command runs inside `bwrap`.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install pytest coverage openai
+pip install -r requirements.txt
 python -m pytest -q -p no:cacheprovider files-c
 cd files-c/section-a && python demo.py
 cd ../section-c && python demo_pipeline.py
@@ -37,21 +37,28 @@ verifies them, including one real retry after a failing attempt, and prints the 
 Against your own repo, with Nemotron on Nebius Token Factory (the default `--generator llm`):
 
 ```bash
-export TOKEN_FACTORY_API_KEY=...   # never commit it; see .env.example for all names
-export TOKEN_FACTORY_BASE_URL=https://api.tokenfactory.nebius.com/v1/
-export TOKEN_FACTORY_MODEL_NANO=... TOKEN_FACTORY_MODEL_SUPER=... TOKEN_FACTORY_MODEL_ULTRA=...
+cp .env.example .env                    # then fill in the key; .env is gitignored
 python scripts/check_token_factory.py   # lists Nemotron IDs and the tier picks
 cd files-c/section-c
 git -C /path/to/repo diff main...feature > /tmp/pr.diff
-python cli.py --repo-url /path/to/repo --ref feature --diff-file /tmp/pr.diff \
-    --changed-files app/billing.py
+python cli.py --repo-url /path/to/repo --ref feature --diff-file /tmp/pr.diff
 ```
+
+`cli.py` and `check_token_factory.py` read the `TOKEN_FACTORY_*` lines of the repo-root
+`.env`; variables already exported win. Thinking is switched off on every call
+(`chat_template_kwargs.enable_thinking=False`): Nemotron 3 ignores system-prompt toggles,
+and its reasoning would otherwise eat the token budget. The analysed files default to the
+non-test `.py` files in the diff (`--changed-files` overrides), and at most `--max-gaps`
+(10) gaps may call the LLM. A test verified for one gap is re-run against later gaps
+before any new test is generated.
 
 Offline, without credentials, add `--generator stub` (canned tests that only fit the demo
 fixture). Generated tests run with `TOKEN_FACTORY_*`, `NEBIUS*` and any `*KEY*`, `*TOKEN*`
 or `*SECRET*` variables removed from their environment.
 
-`--sandbox local` (the default) runs generated code on your machine with **no isolation**.
-Use it only on code you trust.
+Inside the sandbox the root filesystem is read-only, `/tmp` is private, `$HOME` and the
+Windows drives (`/mnt/c`, where `.env` lives) are empty, and there is no network. Only the
+`--sandbox-cwd` workdir is writable and persists. Network is on for exactly two steps:
+cloning the repo and `--install-deps`, which pip-installs into the workdir, not your venv.
 
 More detail: [files-c/README.md](files-c/README.md).

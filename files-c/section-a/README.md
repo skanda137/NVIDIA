@@ -7,9 +7,8 @@ def find_gaps(repo_path: str, diff: str) -> list[Gap]
 def verify_test(repo_path: str, candidate_test: str, target_gap: Gap) -> VerificationResult
 ```
 
-(signatures here also take a `sandbox: SandboxClient` first arg — needed so
-Section 3 can pass in `LocalSandboxClient` during dev and `NebiusSandboxClient`
-for the real thing without this code changing.)
+(signatures here also take a `sandbox: SandboxClient` first arg; Section 3
+passes in `LocalSandboxClient`, which runs every command inside `bwrap`.)
 
 ## What's actually verified vs. what's asserted
 
@@ -38,12 +37,6 @@ network + pytest installed, before you trust it on a real PR:**
   a real pytest+coverage run (the plumbing is straightforward but
   untested; do a run against a real toy repo in `LocalSandboxClient` mode
   first, that alone will need neither Nebius credentials nor a review)
-- `NebiusSandboxClient` end to end — grounded in documented CLI patterns
-  but the file-write-via-heredoc approach has never hit the real API.
-  First thing to do once someone has Token Factory credentials: run
-  `NebiusSandboxClient().write_file("test.txt", "hi")` then
-  `.read_file("test.txt")` and confirm the roundtrip, exactly like the
-  LocalSandboxClient check in `demo.py`, before building anything on top.
 
 ## Known gaps / next steps for whoever picks this up
 
@@ -55,11 +48,6 @@ network + pytest installed, before you trust it on a real PR:**
    fresh rather than diffing against a stored "before" snapshot — simpler,
    and sufficient, because we only care whether the target lines show
    `hits > 0` after this one test, not the whole-suite coverage delta.
-3. The `--file` upload flag and `contree cp` exact syntax are still
-   unconfirmed (see the long comment at the top of `sandbox_client.py`) —
-   deliberately avoided rather than guessed at. If you find the real
-   syntax in the CLI reference, it's a safe, isolated addition; nothing
-   else here depends on it.
 
 ## Changes after the Oct 14 audit
 
@@ -72,9 +60,10 @@ E1 (re-running the covered branch is now rejected), E3 (all three path layouts f
 E4b (an unimported new module is now reported), E4c (one gap, not two), E5 (absolute
 paths), E6 (the ModuleNotFoundError is in the message), E8 (0/6 wrong rejections), the
 real `exit` branch token, and a `while True` candidate (times out as `fail`).
-Not run: anything against Nebius.
-
-`LocalSandboxClient` needs a POSIX shell. On Windows it raises; run the pipeline in WSL.
+`LocalSandboxClient` needs Linux and `bwrap`. On Windows it raises; run the pipeline in WSL2.
+`test_sandbox_env.py` proves the isolation: writes outside the workdir fail with
+`Read-only file system`, the repo `.env`, `~/.config` and `~/.ssh` are not there, and a
+socket connect fails with `Network is unreachable`.
 
 - `Gap.missing_branches` (defaulted): partial_branch gaps now carry coverage.py's missing
   branches, and `verify_test` accepts a candidate only if it takes one of them.
@@ -87,4 +76,3 @@ Not run: anything against Nebius.
   `run_pipeline(..., install_deps=True)` / `cli.py --install-deps`.
 - Deliberately unchanged: a red existing suite still aborts `find_gaps` (fail fast), now
   with the real pytest output in the message.
-- `smoke_nebius.py` collects the evidence still missing for the Nebius client.

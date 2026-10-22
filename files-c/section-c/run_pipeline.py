@@ -30,7 +30,10 @@ from __future__ import annotations
 
 import shlex
 import time
+from dataclasses import replace
 from typing import Callable
+
+import openai
 
 import _paths  # noqa: F401  (section-a and section-b on sys.path)
 from generator import CandidateRejected, generate_test
@@ -39,17 +42,21 @@ from pipeline_models import GapRecord, PipelineConfig, PipelineResult
 from sandbox_client import SandboxClient
 from verifier import find_gaps, prepare_env, verify_test
 
+# The only LLM errors a gap survives: the SDK has already retried them (max_retries=2),
+# so this gap's attempt is spent and the next attempt moves up a tier. Auth, bad
+# request, missing env and everything else propagate: they would fail every gap.
+TRANSIENT_LLM_ERRORS = (openai.APITimeoutError, openai.RateLimitError)
+
 
 def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: str) -> None:
     """Clone + checkout the PR head inside the sandbox. find_gaps() assumes
-    this has already happened -- see verifier.py's docstring. Using git
-    clone/checkout rather than any file-upload API, consistent with
-    sandbox_client.py's documented approach (upload/`contree cp` syntax is
-    unconfirmed, so nothing here depends on it)."""
+    this has already happened -- see verifier.py's docstring. The one step
+    besides prepare_env() that runs with network (a remote repo_url)."""
     # rm -rf first: a rerun into the same sandbox otherwise fails with
     # "destination path already exists" (audit R6/E7).
-    result = sandbox.run(f"rm -rf {repo_path} && git clone --quiet {repo_url} {repo_path} "
-                         f"&& cd {repo_path} && git checkout --quiet {ref}")
+    path, url, rev = shlex.quote(repo_path), shlex.quote(repo_url), shlex.quote(ref)
+    result = sandbox.run(f"rm -rf {path} && git clone --quiet {url} {path} "
+                         f"&& cd {path} && git checkout --quiet {rev}", network=True)
     if not result.ok:
         raise RuntimeError(f"failed to check out {repo_url}@{ref} into sandbox:\n{result.stderr[-2000:]}")
 
@@ -95,6 +102,14 @@ def _run_gap(
             record.verifications.append(rejected)
             prior_failure = rejected.message
             continue
+        except TRANSIENT_LLM_ERRORS as exc:
+            # No code came back; prior_failure is left alone (the model did nothing wrong).
+            record.attempts.append(CandidateTest(code="", target_gap=gap,
+                                                 model_tier_used="(no response)", attempt_number=attempt))
+            record.verifications.append(VerificationResult(
+                status="error", coverage_hit=False,
+                message=f"Token Factory call failed after SDK retries: {type(exc).__name__}: {exc}"))
+            continue
         record.attempts.append(candidate)
 
         verification = verify_test(sandbox, repo_path, candidate)
@@ -118,6 +133,20 @@ def _run_gap(
     return record
 
 
+def _closed_by_earlier(gap: Gap, verified: list[GapRecord], sandbox: SandboxClient,
+                       repo_path: str) -> GapRecord | None:
+    """Re-verify each already-verified test against `gap` (one sandbox run each, no
+    LLM call). The same verify_test check applies: the test must take this gap's
+    missing branch or execute its lines, not merely pass."""
+    for earlier in verified:
+        candidate = replace(earlier.best_candidate, target_gap=gap)
+        verification = verify_test(sandbox, repo_path, candidate)
+        if verification.verified:
+            return GapRecord(gap=gap, attempts=[candidate], verifications=[verification],
+                             final_status="verified_pass", covered_by=earlier.gap)
+    return None
+
+
 def run_pipeline(
     sandbox: SandboxClient,
     repo_url: str,
@@ -126,7 +155,7 @@ def run_pipeline(
     changed_py_files: list[str],
     example_tests: list[str] | None = None,
     config: PipelineConfig | None = None,
-    repo_path: str = "/tmp/_pipeline_repo",
+    repo_path: str = "checked_out_repo",
     install_deps: bool = False,
     generate: Callable[..., CandidateTest] = generate_test,
 ) -> PipelineResult:
@@ -135,9 +164,9 @@ def run_pipeline(
     sandbox (step the real find_gaps() explicitly leaves to the caller).
     diff and changed_py_files are passed straight through to find_gaps(),
     matching verifier.py's real signature exactly.
+    repo_path: relative to the sandbox workdir (the only place that persists).
     install_deps: run verifier.prepare_env() after checkout (pip-installs pytest,
-    coverage and requirements.txt). Leave False for LocalSandboxClient unless
-    you are inside a throwaway venv -- it installs into the host interpreter.
+    coverage and requirements.txt into the sandbox workdir, with network).
     example_tests: None = collect up to 3 test_*.py files from the checked-out repo.
     generate: Section 2's generate_test, or anything with its signature.
     """
@@ -165,10 +194,20 @@ def run_pipeline(
             "set PipelineConfig.run_gaps_in_parallel=False"
         )
 
+    verified: list[GapRecord] = []  # gaps whose test was generated (not reused) and verified
+    gaps_attempted = 0
     for gap in gaps:
-        records.append(_run_gap(gap, sandbox, repo_path, example_tests, config, generate))
+        record = _closed_by_earlier(gap, verified, sandbox, repo_path)
+        if record is None and gaps_attempted >= config.max_gaps:
+            record = GapRecord(gap=gap, final_status="skipped_budget")
+        elif record is None:
+            gaps_attempted += 1
+            record = _run_gap(gap, sandbox, repo_path, example_tests, config, generate)
+            if record.final_status == "verified_pass":
+                verified.append(record)
+        records.append(record)
 
-    tests_generated = sum(len(r.attempts) for r in records)
+    tests_generated = sum(1 for r in records if r.covered_by is None for a in r.attempts if a.code)
     tests_verified_pass = sum(1 for r in records if r.final_status == "verified_pass")
     # "fail" bucket = the test suite ran (no crash/malformed-code error) but
     # the candidate was rejected -- either it genuinely failed, or (the
@@ -198,6 +237,8 @@ def run_pipeline(
         tests_errored=tests_errored,
         duration_seconds=time.monotonic() - start,
         records=records,
+        gaps_closed_by_earlier_test=sum(1 for r in records if r.covered_by is not None),
+        gaps_skipped=sum(1 for r in records if r.final_status == "skipped_budget"),
     )
 
     from render import render_markdown

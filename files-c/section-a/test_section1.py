@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from coverage_diff import compute_gaps, find_coverage_key, parse_coverage_xml
+from coverage_diff import changed_lines_by_file, compute_gaps, find_coverage_key, parse_coverage_xml
 from models import CandidateTest, Gap
 from sandbox_client import CommandResult, LocalSandboxClient
 from verifier import CANDIDATE_RUN_CMD, find_gaps, verify_test
@@ -41,7 +41,7 @@ class FakeSandbox:
         self.files = dict(files or {})
         self.responder = responder or (lambda cmd: None)
 
-    def run(self, command, timeout=120):
+    def run(self, command, timeout=120, network=False):
         self.commands.append(command)
         return self.responder(command) or CommandResult("", "", 0)
 
@@ -63,6 +63,30 @@ def partial_gap():
 
 def candidate(gap, code="def test_x():\n    assert True\n"):
     return CandidateTest(code=code, target_gap=gap, model_tier_used="stub")
+
+
+class ParseDiff(unittest.TestCase):
+    def test_no_newline_marker_does_not_shift_lines(self):
+        diff = ("--- a/m.py\n+++ b/m.py\n@@ -1,2 +1,3 @@\n x = 1\n-y = 2\n"
+                "\\ No newline at end of file\n+y = 3\n+z = 4\n")
+        self.assertEqual(changed_lines_by_file(diff), {"m.py": {2, 3}})
+
+    def test_added_line_that_looks_like_a_header_is_content(self):
+        diff = "--- a/m.py\n+++ b/m.py\n@@ -1 +1,3 @@\n+++ counter\n+-- x\n x = 1\n"
+        self.assertEqual(changed_lines_by_file(diff), {"m.py": {1, 2}})
+
+    def test_removed_line_that_looks_like_a_header_is_content(self):
+        diff = "--- a/m.py\n+++ b/m.py\n@@ -1,2 +1,2 @@\n--- old\n+new\n x = 1\n"
+        self.assertEqual(changed_lines_by_file(diff), {"m.py": {1}})
+
+    def test_deleted_file_then_next_file(self):
+        diff = ("diff --git a/old.py b/old.py\n--- a/old.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n"
+                "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+a\n+b\n")
+        self.assertEqual(changed_lines_by_file(diff), {"new.py": {1, 2}})
+
+    def test_two_hunks_and_no_prefix_paths(self):
+        diff = "--- m.py\n+++ m.py\n@@ -1 +1,2 @@\n a\n+b\n@@ -10,2 +11,2 @@\n-c\n+C\n d\n"
+        self.assertEqual(changed_lines_by_file(diff), {"m.py": {2, 11}})
 
 
 class ParseAndMatch(unittest.TestCase):

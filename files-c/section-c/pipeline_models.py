@@ -13,7 +13,7 @@ from typing import Literal, Optional
 import _paths  # noqa: F401  (section-a on sys.path)
 from models import CandidateTest, Gap, VerificationResult
 
-GapFinalStatus = Literal["verified_pass", "exhausted", "skipped_error"]
+GapFinalStatus = Literal["verified_pass", "exhausted", "skipped_budget"]
 
 
 @dataclass
@@ -23,6 +23,9 @@ class GapRecord:
     attempts: list[CandidateTest] = field(default_factory=list)
     verifications: list[VerificationResult] = field(default_factory=list)
     final_status: GapFinalStatus = "exhausted"
+    # Set when no test was generated for this gap because the test verified for
+    # an earlier gap (covered_by) also closes it.
+    covered_by: Optional[Gap] = None
 
     @property
     def best_candidate(self) -> Optional[CandidateTest]:
@@ -50,10 +53,15 @@ class PipelineResult:
     duration_seconds: float
     records: list[GapRecord] = field(default_factory=list)
     report_markdown: Optional[str] = None
+    gaps_closed_by_earlier_test: int = 0
+    gaps_skipped: int = 0  # over PipelineConfig.max_gaps, never attempted
 
 
 @dataclass
 class PipelineConfig:
     max_attempts_per_gap: int = 3
+    # Gaps that may call the LLM (at most max_attempts_per_gap x 2 calls each, one
+    # repair round per attempt). Gaps closed by an earlier verified test don't count.
+    max_gaps: int = 10
     model_tier: str = "nemotron-nano"
     run_gaps_in_parallel: bool = False  # keep False until verify_test is confirmed thread-safe in a real sandbox

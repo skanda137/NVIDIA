@@ -16,8 +16,10 @@ from sandbox_client import TIMEOUT_RETURNCODE, SandboxClient
 # --source=. : measure every .py under the repo root, so (a) report paths are
 # relative to the repo root like diff paths, and (b) a new module no test
 # imports still appears in the report (0% instead of missing).
-COVERAGE_RUN = "coverage run --branch --source=. -m pytest -q"
-COVERAGE_RUN_CMD = f"{COVERAGE_RUN} && coverage xml -o coverage.xml"
+# python3 -m coverage, not a bare `coverage`: the same interpreter prepare_env
+# installs into with `python3 -m pip`.
+COVERAGE_RUN = "python3 -m coverage run --branch --source=. -m pytest -q"
+COVERAGE_RUN_CMD = f"{COVERAGE_RUN} && python3 -m coverage xml -o coverage.xml"
 
 SUITE_TIMEOUT = 300       # seconds, whole existing suite
 CANDIDATE_TIMEOUT = 120   # seconds, one generated test file
@@ -31,8 +33,8 @@ SCRATCH_XML = "_scratch_coverage.xml"
 # so a correct retry was rejected 4/6 times (audit E8; 0/6 with this set).
 # -p no:cacheprovider: no .pytest_cache churn between candidates.
 CANDIDATE_RUN_CMD = (
-    f"PYTHONDONTWRITEBYTECODE=1 coverage run --branch --source=. -m pytest -q "
-    f"-p no:cacheprovider {SCRATCH_TEST} && coverage xml -o {SCRATCH_XML}"
+    f"PYTHONDONTWRITEBYTECODE=1 python3 -m coverage run --branch --source=. -m pytest -q "
+    f"-p no:cacheprovider {SCRATCH_TEST} && python3 -m coverage xml -o {SCRATCH_XML}"
 )
 
 _HAS_TEST_FN = re.compile(r"\bdef\s+test_\w+")
@@ -40,15 +42,14 @@ _HAS_TEST_FN = re.compile(r"\bdef\s+test_\w+")
 
 def prepare_env(sandbox: SandboxClient, repo_path: str) -> None:
     """Install pytest, coverage and the repo's requirements.txt into the sandbox.
-    Call once after the repo is checked out and before find_gaps. Not called
-    automatically: with LocalSandboxClient it pip-installs into the HOST
-    interpreter, so only call it there from inside a throwaway venv.
-    Needs outbound network from the sandbox (unverified on Nebius).
+    Call once after the repo is checked out and before find_gaps. Runs with
+    network; LocalSandboxClient points pip at its workdir (PIP_TARGET), so the
+    host venv stays read-only.
     Raises on any failure. A repo without requirements.txt gets only the two tools."""
     result = sandbox.run(
         f"cd {repo_path} && python3 -m pip install -q pytest coverage "
         f"&& {{ [ ! -f requirements.txt ] || python3 -m pip install -q -r requirements.txt; }}",
-        timeout=INSTALL_TIMEOUT,
+        timeout=INSTALL_TIMEOUT, network=True,
     )
     if not result.ok:
         raise RuntimeError(f"environment setup failed:\n{(result.stdout + result.stderr)[-2000:]}")

@@ -77,11 +77,10 @@ def main() -> None:
         tmp_path = Path(tmp)
         repo_url, diff, pr_sha = build_fixture_repo(tmp_path)
 
-        # LocalSandboxClient's cwd is just where subprocess runs from --
-        # checkout_repo() clones to an absolute repo_path regardless, same
-        # as it would against NebiusSandboxClient.
+        # The fixture repo is under tmp_path, the bwrap workdir, so
+        # checkout_repo() can clone it without an extra read-only bind.
         sandbox = LocalSandboxClient(cwd=str(tmp_path))
-        # Relative to the sandbox cwd; absolute paths also work now (audit B11 fixed).
+        # Relative to the sandbox workdir, the only path that persists between commands.
         repo_path = "checked_out_repo"
 
         print(f"=== Checking out PR {pr_sha[:8]} into sandbox, running pytest+coverage for real ===")
@@ -106,24 +105,28 @@ def main() -> None:
         # Sanity checks mirroring Section 1's demo.py style: assert on the
         # real pipeline's real output, not just print it.
         assert result.gaps_found == 3, f"expected 3 gaps (matches Section 1's own demo), got {result.gaps_found}"
-        assert result.tests_verified_pass == 3, (
-            f"expected all 3 gaps verified -- two on attempt 1, one (the "
-            f"else-body gap) only after a real retry fixes a real failure, "
-            f"got {result.tests_verified_pass}"
-        )
-        # The else-body gap is the one that proves the retry loop, not just
-        # the happy path: attempt 1 is a genuinely broken candidate (bad
-        # import), real pytest reports a real ModuleNotFoundError, that
-        # failure text flows back into generate_test() as prior_failure,
-        # and attempt 2 passes AND hits the target lines.
-        else_body = next(r for r in result.records if r.gap.start_line == 8)
-        assert len(else_body.attempts) == 2, "expected the else-body gap to need exactly 2 attempts"
-        assert else_body.verifications[0].status == "fail", "attempt 1 should have genuinely failed in real pytest"
-        assert "ModuleNotFoundError" in else_body.verifications[0].message
-        assert else_body.verifications[1].verified, "attempt 2 should pass AND hit the target lines"
-        print(f"\nRetry loop proven: {else_body.gap} failed on attempt 1 with a real")
+        assert result.tests_verified_pass == 3, f"expected all 3 gaps verified, got {result.tests_verified_pass}"
+        # The partial_branch gap proves the retry loop, not just the happy
+        # path: attempt 1 is a genuinely broken candidate (bad import), real
+        # pytest reports a real ModuleNotFoundError, that failure text flows
+        # back into generate_test() as prior_failure, and attempt 2 passes AND
+        # takes the missing branch.
+        branch = next(r for r in result.records if r.gap.start_line == 5)
+        assert len(branch.attempts) == 2, "expected the partial_branch gap to need exactly 2 attempts"
+        assert branch.verifications[0].status == "fail", "attempt 1 should have genuinely failed in real pytest"
+        assert "ModuleNotFoundError" in branch.verifications[0].message
+        assert branch.verifications[1].verified, "attempt 2 should pass AND take the missing branch"
+        # That one test takes the else branch, so it also executes the
+        # else-body and log_non_member_purchase: re-verified per gap under
+        # coverage, not assumed, and no further test is generated.
+        reused = [r for r in result.records if r.covered_by is not None]
+        assert sorted(r.gap.start_line for r in reused) == [8, 14], reused
+        assert result.tests_generated == 2, f"expected 2 generated tests, got {result.tests_generated}"
+        print(f"\nRetry loop proven: {branch.gap} failed on attempt 1 with a real")
         print(f"ModuleNotFoundError from pytest, then passed on attempt 2 once the")
         print(f"(stubbed) generator used that failure message to fix the import.")
+        print(f"Reuse proven: that test also closes {', '.join(str(r.gap) for r in reused)},")
+        print(f"each confirmed by its own coverage run; no test generated for them.")
 
         print("\n=== Rendered report ===\n")
         print(result.report_markdown)

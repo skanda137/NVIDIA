@@ -18,8 +18,11 @@ def generate_test(gap: Gap, example_tests: list[str], attempt: int = 1,
 - **Prompt:** the enclosing function's source (from `source`, which Section C reads from
   the sandbox), up to 3 example tests from the repo, `prior_failure` verbatim on retries,
   and for `partial_branch` gaps each `Gap.missing_branches` entry in words.
+- **Thinking:** off on every call via `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`.
+  Nemotron 3 on Token Factory ignores system-prompt toggles; checked live on all three tiers.
 - **Output:** `<think>` blocks and prose stripped, the fenced code extracted, then linted
-  (syntax, a `test_*` function, no subprocess/socket/requests/urllib/eval/exec/... ).
+  (syntax, a `test_*` function that asserts something (`assert`, `pytest.raises`, `assert*`
+  calls), no subprocess/socket/requests/urllib/eval/exec/... ).
   One repair round; if the code still fails lint, `CandidateRejected` (a `ValueError`)
   is raised and Section C records the attempt as failed.
 - **Tests:** `python -m pytest -q -p no:cacheprovider files-c/section-b`. `conftest.py`

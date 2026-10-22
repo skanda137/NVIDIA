@@ -2,51 +2,40 @@
 Sandbox execution layer.
 
 Everything in coverage_diff.py and verifier.py talks to a `SandboxClient`
-interface, never to subprocess or to the `contree` CLI directly. Two
-implementations:
+interface, never to subprocess directly. One implementation:
 
-- LocalSandboxClient: runs commands with plain local subprocess. No Nebius
-  account needed. Use this for all local development and for the demo below.
-- NebiusSandboxClient: wraps the Nebius Token Factory `contree` CLI. Swap
-  this in once you have API credentials; verifier.py and coverage_diff.py
-  do not change at all.
+- LocalSandboxClient: runs every command inside bubblewrap (`bwrap`) on the
+  local Linux/WSL2 machine. The LLM-generated tests and the PR's own code run
+  here, so they get a read-only root, a private /tmp, no network by default,
+  and no view of the host's home directory or Windows drives (where .env lives).
 
-CONFIDENCE NOTE (read before trusting NebiusSandboxClient blindly):
-The commands below are built only from patterns I directly saw in the
-Nebius Token Factory Sandboxes docs (Overview, Tutorial, Your First
-Sandbox, Install & Authenticate pages, fetched live). Specifically grounded:
-  - `contree auth -y` non-interactive auth
-  - `contree run <command>` executes and prints stdout/stderr
-  - `contree run -D <command>` runs disposable (no new checkpoint)
-  - Sessions are auto-keyed by profile + parent PID + TTY, so sequential
-    `contree run` calls from the same Python process should share one
-    evolving filesystem session without you passing a session id explicitly
-NOT independently confirmed (the docs I pulled didn't show full syntax):
-  - the exact flag for attaching/uploading a local file mid-run (the tutorial
-    index mentions a `--file` flag exists but I never saw its argument order)
-  - exact `contree cp` argument order for pulling a file back out
-To avoid depending on either of those two uncertain pieces, this
-implementation never uploads files and never shells out to `contree cp`.
-It gets code into the sandbox via `git clone`/`git checkout` and heredocs
-inside the command string, and gets files out via `contree run cat <path>`
-(stdout capture), both of which ARE directly confirmed in the docs
-("contree run cat /etc/os-release" is the literal example given). Before
-you rely on this against the real API, run `contree run --help` once and
-confirm nothing above has changed — it's a beta product, weeks old.
+Mount layout of one run() call, in bwrap order (later mounts win):
+  --ro-bind / /              whole host, read-only
+  --tmpfs /mnt/<drive>       Windows drives (repo root, .env) hidden
+  --tmpfs $HOME              ~/.config, ~/.ssh, ~/.git-credentials ... hidden
+  --ro-bind <python roots>   the running interpreter's venv/base, if under $HOME
+  --tmpfs /tmp               private, discarded after the call
+  --ro-bind <ro_paths>       e.g. a local repo to `git clone` from
+  --bind <cwd>               the workdir: read-write, persists across calls
+Only the workdir persists, so repo_path and every write_file/read_file path
+must live under it.
 """
 
 from __future__ import annotations
 
+import glob
 import os
-import shlex
+import shutil
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol
 
 
 DEFAULT_TIMEOUT = 120      # seconds; generated tests can loop forever
 TIMEOUT_RETURNCODE = 124   # same code GNU `timeout` uses
+DEPS_DIR = ".sandbox-site"  # under cwd: pip installs here (PIP_TARGET), the venv stays read-only
 
 
 def scrubbed_env() -> dict[str, str]:
@@ -69,9 +58,10 @@ class CommandResult:
 
 
 class SandboxClient(Protocol):
-    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
-        """Run a shell command in the sandbox's current session (persists
-        filesystem state for the next call, like a real shell)."""
+    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT, network: bool = False) -> CommandResult:
+        """Run a shell command in the sandbox (filesystem state under the
+        workdir persists for the next call, like a real shell). Offline unless
+        `network=True`, which only checkout and dependency install pass."""
         ...
 
     def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
@@ -79,47 +69,72 @@ class SandboxClient(Protocol):
         ...
 
     def write_file(self, path: str, content: str) -> CommandResult:
-        """Write `content` to `path` inside the sandbox via a heredoc,
-        sidestepping any need for a separate file-upload call."""
+        """Write `content` to `path` inside the sandbox."""
         ...
 
     def read_file(self, path: str) -> str:
-        """Read a file's contents back out of the sandbox via stdout capture."""
+        """Read a file's contents back out of the sandbox."""
         ...
 
 
+def _under(path: str, root: str) -> bool:
+    return os.path.commonpath([path, root]) == root
+
+
 class LocalSandboxClient:
-    """Runs everything in a local temp-rooted subprocess. No network, no
-    Nebius account, no 'sandbox' isolation at all -- this is purely so
-    Sections 1-3 can be developed and demoed before anyone has credentials,
-    and so this exact code could be shown running today. Do not use this
-    for anything that touches untrusted/LLM-generated code outside a
-    throwaway environment; it has none of the isolation the real thing has.
-    """
+    """bwrap-isolated subprocess rooted at `cwd` (see the module docstring for
+    the mount layout). `ro_paths` are extra host paths made visible read-only,
+    e.g. a local repo checkout_repo() clones from. Linux/WSL2 only, needs
+    `bwrap` on PATH."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, ro_paths: Iterable[str] = ()):
         # verifier.py's commands are POSIX shell (env-var prefixes, rm -f, [ -f ]).
-        # Under cmd.exe they fail, and every candidate would be silently rejected.
         if os.name != "posix":
-            raise RuntimeError("LocalSandboxClient needs a POSIX shell; on Windows run it inside WSL")
-        self.cwd = cwd
+            raise RuntimeError("LocalSandboxClient needs Linux; on Windows run it inside WSL")
+        if shutil.which("bwrap") is None:
+            raise RuntimeError("LocalSandboxClient needs bubblewrap: `sudo apt install bubblewrap`")
+        self.cwd = os.path.realpath(cwd)
+        if self.cwd == "/tmp":
+            raise ValueError("cwd must be a directory under /tmp, not /tmp itself")
+        self.ro_paths = [os.path.realpath(p) for p in ro_paths]
 
-    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
-        # Popen + own process group so a timeout kills the whole tree: with
-        # shell=True, killing only the shell leaves the child running and
-        # communicate() then blocks on its open pipes.
+    def _bwrap_argv(self, command: str, network: bool) -> list[str]:
+        home = os.path.realpath(os.path.expanduser("~"))
+        argv = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
+        for drive in sorted(glob.glob("/mnt/?")):  # WSL drvfs mounts; /mnt/wsl (resolv.conf) stays
+            argv += ["--tmpfs", drive]
+        argv += ["--tmpfs", home]
+        for root in {os.path.realpath(sys.prefix), os.path.realpath(sys.base_prefix)}:
+            if _under(root, home):
+                argv += ["--ro-bind", root, root]
+        argv += ["--tmpfs", "/tmp"]
+        for p in self.ro_paths:
+            argv += ["--ro-bind", p, p]
+        argv += ["--bind", self.cwd, self.cwd]
+        if not network:
+            argv.append("--unshare-net")
+        argv += ["--unshare-pid", "--unshare-ipc", "--die-with-parent", "--chdir", self.cwd,
+                 "--", "/bin/sh", "-c", command]
+        return argv
+
+    def _env(self) -> dict[str, str]:
+        env = scrubbed_env()
+        deps = os.path.join(self.cwd, DEPS_DIR)
+        env["PIP_TARGET"] = deps
+        env["PYTHONPATH"] = deps + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        return env
+
+    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT, network: bool = False) -> CommandResult:
+        # Own process group so a timeout kills bwrap and, via --die-with-parent
+        # and the pid namespace, everything inside it.
         proc = subprocess.Popen(
-            command, shell=True, cwd=self.cwd, env=scrubbed_env(),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=(os.name == "posix"),
+            self._bwrap_argv(command, network), env=self._env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
         )
         try:
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
             out, err = proc.communicate()
             return CommandResult(out or "", (err or "") + f"\n[timed out after {timeout}s]", TIMEOUT_RETURNCODE)
         return CommandResult(out, err, proc.returncode)
@@ -127,53 +142,17 @@ class LocalSandboxClient:
     def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         return self.run(command, timeout)
 
+    def _host_path(self, path: str) -> str:
+        full = os.path.realpath(os.path.join(self.cwd, path))  # join keeps an absolute `path` as is
+        if not _under(full, self.cwd):
+            raise ValueError(f"{path} is outside the sandbox workdir {self.cwd}")
+        return full
+
     def write_file(self, path: str, content: str) -> CommandResult:
-        with open(os.path.join(self.cwd, path), "w") as f:  # join keeps an absolute `path` as is
+        with open(self._host_path(path), "w") as f:
             f.write(content)
         return CommandResult("", "", 0)
 
     def read_file(self, path: str) -> str:
-        with open(os.path.join(self.cwd, path)) as f:
+        with open(self._host_path(path)) as f:
             return f.read()
-
-
-class NebiusSandboxClient:
-    """Wraps the `contree` CLI. See the module docstring for which parts of
-    this are confirmed against the docs vs. best-guess. Requires `contree
-    auth` to have already been run once (out of band, not from this class --
-    don't put long-lived tokens through code you might commit)."""
-
-    def __init__(self, image: str = "ubuntu-22.04", profile: str = "default"):
-        self.image = image
-        self.profile = profile
-        self._booted = False
-
-    def _contree(self, args: str, disposable: bool = False, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
-        flag = "-D " if disposable else ""
-        full_cmd = f"contree --profile={self.profile} run {flag}{args}"
-        try:
-            proc = subprocess.run(
-                full_cmd, shell=True, capture_output=True, text=True, timeout=timeout, env=scrubbed_env(),
-            )
-        except subprocess.TimeoutExpired:
-            return CommandResult("", f"[contree call timed out after {timeout}s]", TIMEOUT_RETURNCODE)
-        return CommandResult(proc.stdout, proc.stderr, proc.returncode)
-
-    def run(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
-        # Quoted so the remote shell sees one argument, not contree's own flags.
-        return self._contree(f"-- bash -c {shlex.quote(command)}", timeout=timeout)
-
-    def run_disposable(self, command: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
-        return self._contree(f"-- bash -c {shlex.quote(command)}", disposable=True, timeout=timeout)
-
-    def write_file(self, path: str, content: str) -> CommandResult:
-        # Heredoc trick: no upload API needed, just a shell command.
-        marker = "SBX_EOF_7f3a"
-        heredoc_cmd = f"mkdir -p $(dirname {shlex.quote(path)}) && cat > {shlex.quote(path)} << '{marker}'\n{content}\n{marker}"
-        return self.run(heredoc_cmd)
-
-    def read_file(self, path: str) -> str:
-        result = self.run(f"cat {shlex.quote(path)}")
-        if not result.ok:
-            raise FileNotFoundError(f"{path} in sandbox: {result.stderr}")
-        return result.stdout

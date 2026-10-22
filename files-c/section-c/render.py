@@ -12,7 +12,7 @@ from pipeline_models import GapRecord, PipelineResult
 _STATUS_ICON = {
     "verified_pass": "✅",   # check
     "exhausted": "\U0001F7E1",   # yellow circle
-    "skipped_error": "⚠️",  # warning
+    "skipped_budget": "⏭️",  # skip
 }
 
 
@@ -21,8 +21,15 @@ def _render_gap_section(record: GapRecord) -> str:
     icon = _STATUS_ICON.get(record.final_status, "❓")
     lines = [f"### {icon} `{gap}`"]
 
-    if record.final_status == "verified_pass":
-        lines.append(f"Verified in {len(record.attempts)} attempt(s). Generated test:")
+    if record.final_status == "skipped_budget":
+        lines.append("Not attempted: over the run's `max_gaps` budget.")
+    elif record.covered_by is not None:
+        lines.append(f"Closed by the test generated for `{record.covered_by}`, no new test needed. "
+                     f"Coverage check: {record.last_verification.message}.")
+    elif record.final_status == "verified_pass":
+        lines.append(f"Verified in {len(record.attempts)} attempt(s), "
+                     f"tier `{record.best_candidate.model_tier_used}`. "
+                     f"Coverage check: {record.last_verification.message}.")
         lines.append("```python")
         lines.append(record.best_candidate.code.rstrip())
         lines.append("```")
@@ -33,8 +40,8 @@ def _render_gap_section(record: GapRecord) -> str:
         )
         if record.last_verification:
             lines.append(f"Last result: **{record.last_verification.status}** -- {record.last_verification.message}")
-        if record.best_candidate:
-            lines.append("Last candidate tried:")
+        if record.best_candidate and record.best_candidate.code:
+            lines.append(f"Last candidate tried (tier `{record.best_candidate.model_tier_used}`):")
             lines.append("```python")
             lines.append(record.best_candidate.code.rstrip())
             lines.append("```")
@@ -47,9 +54,11 @@ def render_markdown(result: PipelineResult) -> str:
         f"## Verified Test-Gap Report -- `{result.repo}`\n\n"
         f"{result.diff_summary}\n\n"
         f"**{result.gaps_found}** gap(s) found, "
-        f"**{result.tests_verified_pass}** verified with a passing test, "
+        f"**{result.tests_verified_pass}** verified with a passing test "
+        f"({result.gaps_closed_by_earlier_test} of them by a test written for an earlier gap), "
         f"**{result.tests_verified_fail}** attempted but not verified, "
-        f"**{result.tests_errored}** errored out "
+        f"**{result.tests_errored}** errored out, "
+        f"**{result.gaps_skipped}** skipped over budget "
         f"({result.tests_generated} test(s) generated total, "
         f"{result.duration_seconds:.1f}s).\n"
     )

@@ -1,12 +1,13 @@
 """Live evidence for the Nebius Token Factory inference API. 4 API calls in total.
 
-Reads TOKEN_FACTORY_API_KEY and TOKEN_FACTORY_BASE_URL from the environment only
-(never prints the key). GETs {base}/models, prints every Nemotron ID with the fields
-the endpoint returns about features or context, picks the nano/super/ultra tiers with
-generator.discover_tier_models (keyword only), then makes ONE chat completion per tier
-with the generator's real SYSTEM_PROMPT, the user message "Reply with exactly: OK" and
-max_tokens 64. Prints latency, finish_reason, content, whether the message carries
-reasoning, usage, and `export` lines for the chosen tier IDs. Exits non-zero if a tier
+Reads TOKEN_FACTORY_API_KEY and TOKEN_FACTORY_BASE_URL from the environment or the
+repo-root .env (never prints the key). GETs {base}/models, prints every Nemotron ID with
+the fields the endpoint returns about features or context, picks the nano/super/ultra
+tiers with generator.discover_tier_models (keyword only), then makes ONE chat completion
+per tier with the generator's real SYSTEM_PROMPT and thinking switch, the user message
+"Reply with exactly: OK" and max_tokens 64. Prints latency, finish_reason, content,
+whether the message carries reasoning (it should not), usage, and `export` lines for the
+chosen tier IDs. Exits non-zero if a tier
 has no keyword match or any call fails.
 
     python scripts/check_token_factory.py
@@ -45,6 +46,7 @@ def _matching_fields(data, prefix=""):
 
 
 def main() -> int:
+    generator.load_env_file()  # repo-root .env; variables already exported win
     base_url = _env("TOKEN_FACTORY_BASE_URL")
     client = OpenAI(base_url=base_url, api_key=_env("TOKEN_FACTORY_API_KEY"), timeout=60, max_retries=0)
 
@@ -76,6 +78,7 @@ def main() -> int:
                 messages=[{"role": "system", "content": generator.SYSTEM_PROMPT},
                           {"role": "user", "content": "Reply with exactly: OK"}],
                 max_tokens=64,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},  # as generator.py sends
             )
         except Exception as exc:  # report and keep going, so one call per tier still happens
             print(f"ERROR after {time.monotonic() - start:.2f}s: {type(exc).__name__}: {exc}")
@@ -97,7 +100,7 @@ def main() -> int:
         completion_total += usage.completion_tokens
 
     print(f"\nTOTAL tokens: prompt={prompt_total} completion={completion_total} total={prompt_total + completion_total}")
-    print("\n# tier IDs for ~/.config/vtga.env")
+    print("\n# tier IDs for the repo-root .env")
     print(f"export TOKEN_FACTORY_BASE_URL={base_url}")
     for tier in generator.TIERS:
         print(f"export {generator._TIER_ENV[tier]}={tiers[tier]}")

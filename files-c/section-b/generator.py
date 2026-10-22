@@ -21,6 +21,7 @@ import ast
 import functools
 import os
 import re
+from pathlib import Path
 from typing import Callable, Optional
 
 import _paths  # noqa: F401  (section-a on sys.path)
@@ -91,6 +92,23 @@ _TIER_ENV = {
 }
 
 
+ENV_FILE = Path(__file__).resolve().parents[2] / ".env"  # repo root, gitignored
+
+
+def load_env_file(path: Optional[Path] = None) -> None:
+    """Put the TOKEN_FACTORY_* lines of the repo-root .env (KEY=value, optional
+    `export `) into os.environ. Variables already set in the environment win.
+    Entry points call this explicitly; importing this module never reads it."""
+    path = path or ENV_FILE
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        key, sep, value = line.strip().removeprefix("export ").partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if sep and key.startswith("TOKEN_FACTORY_") and value:
+            os.environ.setdefault(key, value)
+
+
 def _provider() -> tuple[str, str]:
     """(api_key, base_url) for Nebius Token Factory. Raises if either is unset."""
     key, base = os.getenv("TOKEN_FACTORY_API_KEY"), os.getenv("TOKEN_FACTORY_BASE_URL")
@@ -145,15 +163,15 @@ def temperature_for_attempt(attempt: int) -> float:
 # Prompting
 # --------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """detailed thinking off
-You are a senior engineer writing a pytest unit test.
+SYSTEM_PROMPT = """You are a senior engineer writing a pytest unit test.
 
 Rules:
 - Output exactly ONE ```python code block and nothing else of value outside it.
 - Write exactly one test function, named test_* (helpers/fixtures are fine). The runner executes
   the whole file, so every test in it must pass. Use plain pytest (assert statements).
 - The test must PASS against the current code and must execute the target lines.
-- Assert on real, observable behaviour (return values, raised exceptions, state), not on implementation details.
+- Every test must check behaviour with an assert or pytest.raises: return values, raised exceptions,
+  captured output (capsys) or state. A test that only calls the code is rejected.
 - Be deterministic: no network, no subprocess, no sleeping, no randomness, no writing outside tmp_path.
 - Use unittest.mock / monkeypatch for external dependencies instead of calling them.
 - Import the code under test with the import line you are given. Do not redefine it.
@@ -166,11 +184,9 @@ MAX_FAILURE_CHARS = 3000
 
 
 def module_path_from_file(path: str) -> str:
-    """'src/pkg/mod.py' -> 'src.pkg.mod'  (hint only; Section 1's runner sets sys.path)."""
-    p = path.replace("\\", "/")
-    if p.endswith(".py"):
-        p = p[:-3]
-    p = p.strip("./")
+    """'app/billing.py' -> 'app.billing'; 'src/pkg/mod.py' -> 'pkg.mod' (src layout:
+    the package is installed or on sys.path as `pkg`). Hint only."""
+    p = path.replace("\\", "/").removeprefix("./").removeprefix("src/").removesuffix(".py")
     if p.endswith("/__init__"):
         p = p[: -len("/__init__")]
     return p.replace("/", ".")
@@ -269,6 +285,19 @@ BANNED_MODULES = {"subprocess", "socket", "requests", "urllib", "http", "httpx",
 BANNED_CALLS = {"eval", "exec", "__import__"}
 
 
+def _has_oracle(func) -> bool:
+    """An assert statement, pytest.raises/warns, or an assert* call (self.assertEqual,
+    mock.assert_called_once_with) anywhere in the test function."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assert):
+            return True
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if name in ("raises", "warns") or name.startswith("assert"):
+                return True
+    return False
+
+
 def lint_candidate(code: str) -> list[str]:
     """Cheap static checks. Returns a list of problems (empty = looks OK)."""
     try:
@@ -280,6 +309,8 @@ def lint_candidate(code: str) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             has_test = True
+            if not _has_oracle(node):
+                problems.append(f"{node.name} has no assert or pytest.raises: it checks nothing")
         elif isinstance(node, ast.Import):
             for a in node.names:
                 if a.name.split(".")[0] in BANNED_MODULES:
@@ -319,7 +350,9 @@ def _client():
 
 
 def token_factory_llm(model: str, messages: list, temperature: float) -> str:
-    """Call a Nemotron model on Nebius Token Factory."""
+    """Call a Nemotron model on Nebius Token Factory. Nemotron 3 reasons by default and
+    ignores system-prompt toggles; enable_thinking=False is the switch that works on all
+    three tiers (checked live 2026-10-21: 0 reasoning tokens)."""
     resp = _client().chat.completions.create(
         model=model,
         messages=messages,
@@ -327,6 +360,7 @@ def token_factory_llm(model: str, messages: list, temperature: float) -> str:
         top_p=0.95,
         max_tokens=1800,
         timeout=90,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     return resp.choices[0].message.content or ""
 

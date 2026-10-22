@@ -50,22 +50,18 @@ hand-built fixtures standing in for a real run:**
 - `render_markdown()` producing the full report shown in `demo_pipeline.py`'s output.
 
 **NOT verified:**
-- `NebiusSandboxClient` end to end — same caveat Section 1's README gives;
-  nothing here changes it since `run_pipeline()` only talks to the
-  `SandboxClient` protocol, not to either implementation directly.
 - `run_gaps_in_parallel=True` — deliberately raises `NotImplementedError`
   rather than silently racing; see the comment in `run_pipeline.py` for why
   (concurrent gaps could step on each other's shared `_scratch_verify_test.py`
   inside one evolving sandbox session).
-- A live run of Section 2's generator through this loop. The wiring is tested
-  offline (`test_pipeline_integration.py`, fake LLM, real git/pytest/coverage).
 
 ## Fixed since the Oct 14 audit
 
-- Absolute `repo_path` with `LocalSandboxClient`: fixed in Section 1 (`os.path.join`).
+- `repo_path` must be under the sandbox workdir (default `checked_out_repo`): `bwrap` gives
+  each command a fresh `/tmp`, so nothing else persists.
 - Rerunning into the same sandbox dir: `checkout_repo` now does `rm -rf` before cloning.
 - Timeouts: every sandbox call has one (Section 1); a looping candidate becomes `fail`.
-- `cli.py --sandbox {local,nebius}` and `--install-deps` (calls `verifier.prepare_env`).
+- `cli.py --install-deps` (calls `verifier.prepare_env`, with network, into the workdir).
 - Section 1 files are imported from `../section-a` via `_paths.py`; no copies here.
 
 ## Known gaps / next steps

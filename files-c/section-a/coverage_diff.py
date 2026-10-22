@@ -20,44 +20,53 @@ from models import Gap
 
 # ---------- 1. Parse the diff: which new-file lines did this PR touch? ----------
 
-_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def changed_lines_by_file(diff_text: str) -> dict[str, set[int]]:
     """Parse a standard `git diff` and return, per target file, the set of
     line numbers (in the NEW version of the file) that were added or
-    modified. Deleted lines are irrelevant -- they don't exist to cover."""
+    modified. Deleted lines are irrelevant -- they don't exist to cover.
+
+    Hunk bodies are consumed by the line counts in their `@@` header, so a
+    body line is never mistaken for a header (an added line "++ x" shows up
+    as "+++ x"), and `\\ No newline at end of file` never shifts the count."""
     result: dict[str, set[int]] = {}
     current_file: Optional[str] = None
     new_line_no = 0
+    old_left = new_left = 0  # lines of the current hunk body not yet seen
 
     for line in diff_text.splitlines():
+        if old_left > 0 or new_left > 0:
+            if line.startswith("\\"):
+                continue  # "\ No newline at end of file": not a line of either file
+            if line.startswith("+"):
+                if current_file is not None:
+                    result[current_file].add(new_line_no)
+                new_line_no += 1
+                new_left -= 1
+            elif line.startswith("-"):
+                old_left -= 1  # removed line, doesn't exist in new file
+            else:
+                new_line_no += 1  # context line (or "" if its leading space was stripped)
+                old_left -= 1
+                new_left -= 1
+            continue
+
         if line.startswith("+++ "):
-            path = line[4:].strip()
+            path = line[4:].split("\t", 1)[0].strip()
             if path == "/dev/null":
-                current_file = None
+                current_file = None  # deleted file
             else:
                 # "+++ b/app/billing.py" -> "app/billing.py"
                 current_file = path.split("/", 1)[1] if path.startswith(("a/", "b/")) else path
                 result.setdefault(current_file, set())
-            continue
-
-        if line.startswith("@@"):
+        elif line.startswith("@@"):
             m = _HUNK_HEADER.match(line)
             if m:
-                new_line_no = int(m.group(1))
-            continue
-
-        if current_file is None:
-            continue
-
-        if line.startswith("+") and not line.startswith("+++"):
-            result[current_file].add(new_line_no)
-            new_line_no += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            pass  # removed line, doesn't exist in new file, don't advance counter
-        else:
-            new_line_no += 1  # context line, exists in both, advance counter
+                old_left = int(m.group(1) if m.group(1) is not None else 1)
+                new_line_no = int(m.group(2))
+                new_left = int(m.group(3) if m.group(3) is not None else 1)
 
     return result
 

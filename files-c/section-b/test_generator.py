@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import openai
 import pytest
 
 import generator as g
@@ -98,8 +99,7 @@ def test_prompt_contains_real_function_source_not_just_name(tiers):
     llm = FakeLLM(GOOD)
     g.generate_test(GAP, [], source=SOURCE, llm=llm)
     p = user_prompt(llm)
-    assert "src.shop.pricing" in p
-    assert "import <name>" in p
+    assert "from shop.pricing import <name>" in p  # src/ layout: package is `shop`
     assert "10-11" in p
     assert "OTHER side" in p
     assert "return price * 0.8" in p       # real body shown
@@ -174,6 +174,46 @@ def test_lint_flags_problems():
     assert "no function" in g.lint_candidate("x = 1")[0]
     assert any("subprocess" in p for p in g.lint_candidate("import subprocess\ndef test_a(): pass"))
     assert g.lint_candidate("def test_a():\n    assert True") == []
+
+
+@pytest.mark.parametrize("body", [
+    "    assert f() == 1",
+    "    with pytest.raises(ValueError):\n        f()",
+    "    self.assertEqual(f(), 1)",
+    "    m.assert_called_once_with(1)",
+])
+def test_lint_accepts_any_oracle(body):
+    assert g.lint_candidate(f"def test_a():\n{body}") == []
+
+
+def test_lint_rejects_test_without_oracle():
+    problems = g.lint_candidate("def test_a():\n    f(1)\n\ndef test_b():\n    assert f(2)")
+    assert problems == ["test_a has no assert or pytest.raises: it checks nothing"]
+
+
+def test_module_path_hint():
+    assert g.module_path_from_file("app/billing.py") == "app.billing"
+    assert g.module_path_from_file("src/pkg/mod.py") == "pkg.mod"
+    assert g.module_path_from_file("./pkg/__init__.py") == "pkg"
+    assert g.module_path_from_file("billing.py") == "billing"
+
+
+def test_thinking_disabled_on_every_call(monkeypatch):
+    sent = {}
+
+    class Completions:
+        def create(self, **kw):
+            sent.update(kw)
+            msg = type("M", (), {"content": "ok"})
+            return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+    client = type("Client", (), {"chat": type("Chat", (), {"completions": Completions()})})
+    monkeypatch.setenv("TOKEN_FACTORY_API_KEY", "k")
+    monkeypatch.setenv("TOKEN_FACTORY_BASE_URL", "https://example.invalid/v1/")
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: client)
+    assert g.token_factory_llm("m", [], 0.2) == "ok"
+    assert sent["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert "detailed thinking" not in g.SYSTEM_PROMPT
 
 
 def test_repair_round_runs_once_on_bad_output(tiers):

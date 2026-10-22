@@ -1,0 +1,4 @@
+# Versions the test suite and the live Token Factory probe ran against (WSL, Python 3.14).
+pytest==9.1.1
+coverage==7.16.2
+openai==3.31.0

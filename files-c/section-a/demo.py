@@ -17,7 +17,7 @@ DIFF = '''diff --git a/billing.py b/billing.py
 index 83db48f..bf269b5 100644
 --- a/billing.py
 +++ b/billing.py
-@@ -1,2 +1,12 @@
+@@ -1 +1,14 @@
  """Billing helpers."""
 +
 +
@@ -86,8 +86,8 @@ def main():
     changed = changed_lines_by_file(DIFF)
     for f, lines in changed.items():
         print(f"  {f}: {sorted(lines)}")
-    # hunk declares "+1,12" -> new-file lines 1-12 touched by this hunk; line 1
-    # is a context line (unchanged), lines 2-14 are the 13 added lines.
+    # hunk declares "+1,14" -> new-file lines 1-14; line 1 is a context line
+    # (unchanged), lines 2-14 are the 13 added lines.
     assert changed["billing.py"] == set(range(2, 15)), sorted(changed["billing.py"])
     print("  OK: new-file line numbers match what the diff actually added\n")
 

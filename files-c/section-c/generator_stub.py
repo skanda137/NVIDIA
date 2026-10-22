@@ -15,9 +15,10 @@ orchestrator needs to know which one it's calling.
 
 What this stub actually does: for a Gap whose function_context and reason
 it recognizes (the billing.py demo case), it hand-writes a real, correct
-pytest test. For anything else, it deliberately returns a test that will
-FAIL verification -- so the orchestrator's retry path is exercised honestly
-rather than always taking the "everything passes first try" happy path.
+pytest test, except on attempt 1 of the first gap, which deliberately FAILS
+verification so the orchestrator's retry path is exercised honestly rather
+than always taking the "everything passes first try" happy path. For any
+other gap it returns a vacuous test that verification rejects.
 """
 
 from __future__ import annotations
@@ -35,31 +36,14 @@ def generate_test(
     *,
     source: str | None = None,  # accepted for signature parity with Section 2; unused
 ) -> CandidateTest:
+    # The `if is_member:` gap (billing.py:5, partial_branch) is the first gap the
+    # pipeline sees: deliberately broken on attempt 1 (imports a module that
+    # doesn't exist), so verify_test() reports a genuine failure and the retry
+    # loop has something real to retry against. On attempt 2+, "fix" it the way
+    # a real generator would after reading the ModuleNotFoundError in
+    # prior_failure. The fixed test takes the else branch, so it also closes the
+    # else-body and log_non_member_purchase gaps, and run_pipeline reuses it.
     if gap.function_context == "calculate_discount" and gap.reason == "partial_branch":
-        code = (
-            "def test_calculate_discount_for_non_member():\n"
-            "    from billing import calculate_discount\n"
-            "    result = calculate_discount(100.0, is_member=False)\n"
-            "    assert result == 95.0\n"
-        )
-        return CandidateTest(code=code, target_gap=gap, model_tier_used=STUB_MODEL_TIER, attempt_number=attempt)
-
-    if gap.function_context == "log_non_member_purchase" and gap.reason == "uncovered":
-        code = (
-            "def test_log_non_member_purchase_runs():\n"
-            "    from billing import log_non_member_purchase\n"
-            "    log_non_member_purchase(42.0)\n"
-        )
-        return CandidateTest(code=code, target_gap=gap, model_tier_used=STUB_MODEL_TIER, attempt_number=attempt)
-
-    # The else-body gap (billing.py:8-9, uncovered, function_context
-    # "calculate_discount"): deliberately broken on attempt 1 (imports a
-    # function that doesn't exist), so verify_test() reports a genuine
-    # failure and the retry loop has something real to retry against. On
-    # attempt 2+, use prior_failure the way a real generator would -- see
-    # the ModuleNotFoundError text got fed back in, so "fix" by importing
-    # the right thing and actually exercising the else branch this time.
-    if gap.function_context == "calculate_discount" and gap.reason == "uncovered":
         if attempt == 1:
             code = (
                 "def test_calculate_discount_for_non_member_v1():\n"
@@ -68,13 +52,31 @@ def generate_test(
             )
         else:
             code = (
-                "def test_calculate_discount_for_non_member_v2():\n"
-                "    # retry informed by prior_failure (a real generator would\n"
-                "    # parse the ModuleNotFoundError and correct the import)\n"
+                "def test_calculate_discount_for_non_member():\n"
                 "    from billing import calculate_discount\n"
                 "    result = calculate_discount(100.0, is_member=False)\n"
                 "    assert result == 95.0\n"
             )
+        return CandidateTest(code=code, target_gap=gap, model_tier_used=STUB_MODEL_TIER, attempt_number=attempt)
+
+    if gap.function_context == "log_non_member_purchase" and gap.reason == "uncovered":
+        code = (
+            "def test_log_non_member_purchase_prints_amount(capsys):\n"
+            "    from billing import log_non_member_purchase\n"
+            "    log_non_member_purchase(42.0)\n"
+            "    assert capsys.readouterr().out == 'non-member purchase: 42.0\\n'\n"
+        )
+        return CandidateTest(code=code, target_gap=gap, model_tier_used=STUB_MODEL_TIER, attempt_number=attempt)
+
+    # The else-body gap (billing.py:8-9, uncovered). Not reached in the demo
+    # (closed by the partial_branch test above); kept so the stub can answer
+    # every billing gap on its own.
+    if gap.function_context == "calculate_discount" and gap.reason == "uncovered":
+        code = (
+            "def test_calculate_discount_for_non_member_else_body():\n"
+            "    from billing import calculate_discount\n"
+            "    assert calculate_discount(100.0, is_member=False) == 95.0\n"
+        )
         return CandidateTest(code=code, target_gap=gap, model_tier_used=STUB_MODEL_TIER, attempt_number=attempt)
 
     # Any other, truly-unrecognized gap shape: give up gracefully rather

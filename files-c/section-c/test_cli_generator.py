@@ -14,10 +14,35 @@ def _argv(*extra):
 
 
 @pytest.fixture(autouse=True)
-def _no_token_factory_env(monkeypatch):
+def _no_token_factory_env(monkeypatch, tmp_path):
     for name in list(os.environ):
         if name.startswith("TOKEN_FACTORY_"):
             monkeypatch.delenv(name)
+    monkeypatch.setattr(cli.generator, "ENV_FILE", tmp_path / "no.env")  # not the real repo .env
+
+
+def test_llm_reads_repo_env_file(monkeypatch, tmp_path, capsys):
+    env = tmp_path / ".env"
+    env.write_text("TOKEN_FACTORY_API_KEY=k\nexport TOKEN_FACTORY_BASE_URL='https://x/v1/'\nOTHER=1\n")
+    monkeypatch.setattr(cli.generator, "ENV_FILE", env)
+    for name in ("TOKEN_FACTORY_API_KEY", "TOKEN_FACTORY_BASE_URL"):  # so teardown removes what the load sets
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(sys, "argv", _argv())
+    with pytest.raises(SystemExit):
+        cli.main()
+    err = capsys.readouterr().err
+    assert "TOKEN_FACTORY_MODEL_NANO" in err and "TOKEN_FACTORY_API_KEY" not in err
+    assert os.environ["TOKEN_FACTORY_BASE_URL"] == "https://x/v1/" and "OTHER" not in os.environ
+
+
+def test_changed_files_default_to_non_test_py_files_in_diff():
+    diff = ("--- a/app/b.py\n+++ b/app/b.py\n@@ -1 +1,2 @@\n x\n+y\n"
+            "--- a/tests/test_b.py\n+++ b/tests/test_b.py\n@@ -0,0 +1 @@\n+t\n"
+            "--- a/README.md\n+++ b/README.md\n@@ -0,0 +1 @@\n+r\n"
+            "--- a/gone.py\n+++ b/gone.py\n@@ -1 +0,0 @@\n-z\n"
+            "--- a/conftest.py\n+++ b/conftest.py\n@@ -0,0 +1 @@\n+c\n")
+    assert cli.changed_py_files_from_diff(diff) == ["app/b.py"]
 
 
 def test_llm_is_default_and_fails_fast_without_env(monkeypatch, capsys):

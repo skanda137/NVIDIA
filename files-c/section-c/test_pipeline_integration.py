@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 
+import httpx2 as httpx  # the transport openai 3.x is built on (requirements.txt pins it)
+import openai
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -19,9 +21,9 @@ from sandbox_client import LocalSandboxClient  # noqa: E402
 # The stub's known-good tests, keyed by the gap's first line in billing.py.
 KNOWN_GOOD = {
     5: generator_stub.generate_test(
-        generator.Gap("billing.py", 5, 5, "calculate_discount", "partial_branch"), [], attempt=1).code,
+        generator.Gap("billing.py", 5, 5, "calculate_discount", "partial_branch"), [], attempt=2).code,
     8: generator_stub.generate_test(
-        generator.Gap("billing.py", 8, 9, "calculate_discount", "uncovered"), [], attempt=2).code,
+        generator.Gap("billing.py", 8, 9, "calculate_discount", "uncovered"), [], attempt=1).code,
     14: generator_stub.generate_test(
         generator.Gap("billing.py", 14, 14, "log_non_member_purchase", "uncovered"), [], attempt=1).code,
 }
@@ -51,11 +53,14 @@ def tiers(monkeypatch):
     monkeypatch.setenv("TOKEN_FACTORY_MODEL_ULTRA", "fake/nemotron-ultra")
 
 
-def _run(fixture_repo, tmp_path, generate, attempts=3):
+REQ = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+
+
+def _run(fixture_repo, tmp_path, generate, attempts=3, max_gaps=10):
     url, diff, sha = fixture_repo
     tmp_path.mkdir(parents=True, exist_ok=True)
-    return run_pipeline(LocalSandboxClient(cwd=str(tmp_path)), url, sha, diff, ["billing.py"],
-                        config=PipelineConfig(max_attempts_per_gap=attempts),
+    return run_pipeline(LocalSandboxClient(cwd=str(tmp_path), ro_paths=[url]), url, sha, diff, ["billing.py"],
+                        config=PipelineConfig(max_attempts_per_gap=attempts, max_gaps=max_gaps),
                         repo_path="checked_out_repo", generate=generate)
 
 
@@ -65,7 +70,9 @@ def test_fake_llm_generator_matches_stub_verified_count(fixture_repo, tmp_path, 
     real = _run(fixture_repo, tmp_path / "llm", functools.partial(generator.generate_test, llm=llm))
     assert stub.gaps_found == real.gaps_found == 3
     assert real.tests_verified_pass == stub.tests_verified_pass == 3
-    assert llm.calls == ["fake/nemotron-nano"] * 3
+    # gap 5's test takes the else branch, so it also closes 8-9 and 14: one LLM call
+    assert llm.calls == ["fake/nemotron-nano"]
+    assert real.gaps_closed_by_earlier_test == 2 and real.tests_generated == 1
     assert all(r.attempts[0].model_tier_used == "nemotron-nano" for r in real.records)
 
 
@@ -81,7 +88,7 @@ def test_rejected_candidate_becomes_failed_attempt_and_prior_failure(fixture_rep
 
     result = _run(fixture_repo, tmp_path, generate)
     assert result.tests_verified_pass == 3
-    for rec in result.records:
+    for rec in (r for r in result.records if r.covered_by is None):
         assert len(rec.attempts) == 2
         assert rec.attempts[0].model_tier_used == "nemotron-nano" and rec.attempts[0].code == "import subprocess"
         assert rec.verifications[0].status == "fail"
@@ -103,7 +110,7 @@ def test_exhausted_gap_is_flagged_for_human_review(fixture_repo, tmp_path):
 
 def test_collect_example_tests_reads_repo_tests_not_scratch(fixture_repo, tmp_path):
     url, _, sha = fixture_repo
-    sb = LocalSandboxClient(cwd=str(tmp_path))
+    sb = LocalSandboxClient(cwd=str(tmp_path), ro_paths=[url])
     assert sb.run(f"git clone -q {url} repo && cd repo && git checkout -q {sha}").ok
     (tmp_path / "repo" / "_scratch_test_x.py").write_text("SCRATCH")
     (tmp_path / "repo" / "pkg").mkdir()
@@ -113,3 +120,39 @@ def test_collect_example_tests_reads_repo_tests_not_scratch(fixture_repo, tmp_pa
     assert "test_calculate_discount_for_member" in examples[1]  # ./test_billing.py sorts after ./pkg/
     assert all("SCRATCH" not in e for e in examples)
     assert len(collect_example_tests(sb, "repo", limit=1)) == 1
+
+
+def test_transient_llm_error_spends_one_attempt_then_retries(fixture_repo, tmp_path, tiers):
+    def generate(gap, example_tests, attempt=1, prior_failure=None, *, source=None):
+        if attempt == 1:
+            raise openai.APITimeoutError(request=REQ)
+        assert prior_failure is None  # the model did nothing wrong; nothing to feed back
+        return generator.generate_test(gap, example_tests, attempt, prior_failure, source=source, llm=FakeLLM())
+
+    result = _run(fixture_repo, tmp_path, generate)
+    assert result.tests_verified_pass == 3
+    first = result.records[0]
+    assert first.verifications[0].status == "error" and "APITimeoutError" in first.verifications[0].message
+    assert first.attempts[1].model_tier_used == "nemotron-super"
+    assert result.tests_generated == 1  # the timed-out attempt produced no test
+
+
+def test_auth_error_fails_fast(fixture_repo, tmp_path):
+    def generate(*args, **kwargs):
+        raise openai.AuthenticationError("bad key", response=httpx.Response(401, request=REQ), body=None)
+
+    with pytest.raises(openai.AuthenticationError):
+        _run(fixture_repo, tmp_path, generate)
+
+
+def test_max_gaps_skips_the_rest_without_calling_the_generator(fixture_repo, tmp_path):
+    called = []
+
+    def always_rejected(gap, example_tests, attempt=1, prior_failure=None, *, source=None):
+        called.append(gap.start_line)
+        raise generator.CandidateRejected(["no function named test_* found"], code="", tier="nemotron-nano")
+
+    result = _run(fixture_repo, tmp_path, always_rejected, attempts=1, max_gaps=1)
+    assert called == [5]
+    assert [r.final_status for r in result.records] == ["exhausted", "skipped_budget", "skipped_budget"]
+    assert result.gaps_skipped == 2 and result.report_markdown.count("max_gaps") == 2
