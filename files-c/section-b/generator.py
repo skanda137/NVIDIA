@@ -372,7 +372,7 @@ def token_factory_llm(model: str, messages: list, temperature: float) -> str:
         timeout=90,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
-    usage = resp.usage
+    usage = getattr(resp, "usage", None)
     USAGE.append((model, usage.prompt_tokens if usage else 0, usage.completion_tokens if usage else 0,
                   time.monotonic() - start))
     return resp.choices[0].message.content or ""
