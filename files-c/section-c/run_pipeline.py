@@ -197,6 +197,7 @@ def run_pipeline(
     verified: list[GapRecord] = []  # gaps whose test was generated (not reused) and verified
     gaps_attempted = 0
     for gap in gaps:
+        gap_start = time.monotonic()
         record = _closed_by_earlier(gap, verified, sandbox, repo_path)
         if record is None and gaps_attempted >= config.max_gaps:
             record = GapRecord(gap=gap, final_status="skipped_budget")
@@ -205,6 +206,7 @@ def run_pipeline(
             record = _run_gap(gap, sandbox, repo_path, example_tests, config, generate)
             if record.final_status == "verified_pass":
                 verified.append(record)
+        record.seconds = time.monotonic() - gap_start
         records.append(record)
 
     tests_generated = sum(1 for r in records if r.covered_by is None for a in r.attempts if a.code)

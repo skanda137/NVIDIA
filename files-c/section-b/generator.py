@@ -21,6 +21,7 @@ import ast
 import functools
 import os
 import re
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -352,10 +353,16 @@ def _client():
     return OpenAI(base_url=base, api_key=key, max_retries=2)
 
 
+# One (model, prompt_tokens, completion_tokens, seconds) per Token Factory call, in
+# order. Read by eval/run_eval.py for token and latency accounting; nothing else.
+USAGE: list[tuple[str, int, int, float]] = []
+
+
 def token_factory_llm(model: str, messages: list, temperature: float) -> str:
     """Call a Nemotron model on Nebius Token Factory. Nemotron 3 reasons by default and
     ignores system-prompt toggles; enable_thinking=False is the switch that works on all
     three tiers (checked live 2026-10-21: 0 reasoning tokens)."""
+    start = time.monotonic()
     resp = _client().chat.completions.create(
         model=model,
         messages=messages,
@@ -365,6 +372,9 @@ def token_factory_llm(model: str, messages: list, temperature: float) -> str:
         timeout=90,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
+    usage = resp.usage
+    USAGE.append((model, usage.prompt_tokens if usage else 0, usage.completion_tokens if usage else 0,
+                  time.monotonic() - start))
     return resp.choices[0].message.content or ""
 
 
