@@ -26,6 +26,7 @@ class GapRecord:
     # Set when no test was generated for this gap because the test verified for
     # an earlier gap (covered_by) also closes it.
     covered_by: Optional[Gap] = None
+    seconds: float = 0.0  # wall time for this gap: reuse checks, LLM calls and sandbox runs
 
     @property
     def best_candidate(self) -> Optional[CandidateTest]:

@@ -1,0 +1,47 @@
+diff --git a/sqlparse/sql.py b/sqlparse/sql.py
+index 5489f055..ec44a6da 100644
+--- a/sqlparse/sql.py
++++ b/sqlparse/sql.py
+@@ -18,8 +18,11 @@ class NameAliasMixin:
+ 
+     def get_real_name(self):
+         """Returns the real name (object name) of this identifier."""
+-        # a.b
+-        dot_idx, _ = self.token_next_by(m=(T.Punctuation, '.'))
++        # a.b.c -> real name is the component after the *last* dot
++        dot_idx = None
++        for idx, tok in enumerate(self.tokens):
++            if tok.match(T.Punctuation, '.'):
++                dot_idx = idx
+         return self._get_first_name(dot_idx, real_name=True)
+ 
+     def get_alias(self):
+diff --git a/tests/test_parse.py b/tests/test_parse.py
+index 34800cb7..67168410 100644
+--- a/tests/test_parse.py
++++ b/tests/test_parse.py
+@@ -466,6 +466,24 @@ def test_get_real_name():
+     assert 't' == stmts[0].tokens[2].get_alias()
+ 
+ 
++def test_get_real_name_multi_part_dotted():
++    # issue 332: for a fully-qualified name the real name is the component
++    # after the *last* dot, not an intermediate one.
++    ident = sqlparse.parse("db.schema.tbl.col")[0].tokens[0]
++    assert 'col' == ident.get_real_name()
++    assert 'col' == ident.get_name()
++    # the parent object still anchors on the first dot
++    assert 'db' == ident.get_parent_name()
++
++    aliased = sqlparse.parse("x.y.z AS w")[0].tokens[0]
++    assert 'z' == aliased.get_real_name()
++    assert 'w' == aliased.get_alias()
++
++    # two-part names and function calls stay correct
++    assert 'b' == sqlparse.parse("a.b")[0].tokens[0].get_real_name()
++    assert 'func' == sqlparse.parse("mydb.sch.func(1)")[0].tokens[0].get_real_name()
++
++
+ def test_from_subquery():
+     # issue 446
+     s = 'from(select 1)'
