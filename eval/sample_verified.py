@@ -66,7 +66,7 @@ def source_lines(repo: str, file: str, start: int, end: int) -> str:
 
 
 def main() -> None:
-    jsonl = Path(sys.argv[1])
+    jsonl = Path(sys.argv[1]).resolve()
     gaps = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     verified = [g for g in gaps if g["final_status"] == "verified_pass"]
     sample = random.Random(SEED).sample(verified, min(N, len(verified)))
@@ -96,7 +96,7 @@ def main() -> None:
                f"**{value_checked}/{len(sample)}**",
                "- Checks by class: " + ", ".join(f"{k} {v}" for k, v in sorted(tally.items())), ""]
     out[4:4] = summary
-    dest = ROOT / "docs" / "evidence" / f"verified_sample_{dt.date.today().isoformat()}.md"
+    dest = ROOT / "docs" / "evidence" / f"verified_sample_{jsonl.stem.removeprefix('eval_')}.md"
     dest.write_text("\n".join(out) + "\n")
     print("\n".join(out))
 
