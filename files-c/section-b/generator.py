@@ -18,6 +18,7 @@ Design notes
 from __future__ import annotations
 
 import ast
+import builtins
 import functools
 import os
 import re
@@ -41,10 +42,16 @@ def _node_start(node) -> int:
 
 def find_function_source(source: str, name: str, line_no: int) -> str:
     """Source text of the innermost def called `name` that contains `line_no`."""
+    span = _function_span(source, name, line_no)
+    return "\n".join(source.splitlines()[span[0] - 1 : span[1]]) if span else ""
+
+
+def _function_span(source: str, name: str, line_no: int) -> Optional[tuple[int, int]]:
+    """(first, last) file line of the innermost def called `name` containing `line_no`."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return ""
+        return None
     best = None
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
@@ -53,29 +60,23 @@ def find_function_source(source: str, name: str, line_no: int) -> str:
                 best is None or (end - node.lineno) < (best.end_lineno - best.lineno)
             ):
                 best = node
-    if best is None:
-        return ""
-    lines = source.splitlines()
-    return "\n".join(lines[_node_start(best) - 1 : best.end_lineno])
+    return (_node_start(best), best.end_lineno) if best else None
 
 
 def code_context(gap, source: Optional[str]) -> str:
-    """What the model sees as 'code under test'.
-
-    Section 1 currently gives only the function NAME in gap.function_context, so we need the
-    file text (`source`) to show real code. Falls back to a +-15 line window for module-level
-    gaps, and to function_context itself if it already looks like code.
+    """What the model sees as 'code under test': the enclosing function (or a +-15 line
+    window for module-level gaps), each line prefixed with its line number in the file and
+    the target lines marked `>`. Without the numbers the prompt's "target lines 22-22" cannot
+    be located (eval runs A/B: tests aimed at the wrong branch). No source: function_context.
     """
     ctx = _field(gap, "function_context") or ""
     start, end = _field(gap, "start_line"), _field(gap, "end_line")
-    if source:
-        body = find_function_source(source, ctx, start) if ctx.isidentifier() else ""
-        if not body:
-            lines = source.splitlines()
-            lo, hi = max(0, start - 16), min(len(lines), end + 15)
-            body = "\n".join(lines[lo:hi])
-        return body
-    return ctx  # may be just a name; prompt tells the model it is limited
+    if not source:
+        return ctx  # may be just a name; prompt tells the model it is limited
+    lines = source.splitlines()
+    span = _function_span(source, ctx, start) if ctx.isidentifier() else None
+    lo, hi = span if span else (max(1, start - 15), min(len(lines), end + 15))
+    return "\n".join(f"{n:>4}{'>' if start <= n <= end else ' '}| {lines[n - 1]}" for n in range(lo, hi + 1))
 
 
 LLMFn = Callable[[str, list, float], str]  # (model, messages, temperature) -> text
@@ -237,7 +238,9 @@ def build_messages(
         f"Import line hint: from {module} import <name>\n"
         f"Target lines (in the file, 1-indexed): {start}-{end}\n"
         f"Why this is a gap: {_reason_instruction(gap)}\n\n"
-        f"Enclosing code under test:\n```python\n{_truncate(code_context(gap, source), MAX_CONTEXT_CHARS)}\n```\n\n"
+        "Enclosing code under test (each line starts with its line number in the file, `>` marks "
+        "the target lines; the prefix is not part of the code):\n"
+        f"```python\n{_truncate(code_context(gap, source), MAX_CONTEXT_CHARS)}\n```\n\n"
         f"Existing tests in this repo for style reference:\n{examples}\n"
         "Write the test now."
     )
@@ -301,6 +304,34 @@ def _has_oracle(func) -> bool:
     return False
 
 
+def _undefined_names(tree: ast.AST) -> list[str]:
+    """Names the code reads but never imports, defines or gets from builtins: each would be a
+    NameError in the sandbox (eval runs A/B: `pytest.raises` without `import pytest`).
+    Scope-insensitive on purpose, so it only misses, never invents, a problem. Skipped when
+    there is a star import."""
+    nodes = list(ast.walk(tree))
+    if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in nodes):
+        return []
+    bound = set(dir(builtins)) | {"__file__"}
+    for n in nodes:
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            bound |= {(a.asname or a.name).split(".")[0] for a in n.names}
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(n.name)
+        elif isinstance(n, ast.arg):
+            bound.add(n.arg)
+        elif isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            bound.add(n.id)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound |= set(n.names)
+        elif isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            bound.add(n.rest)
+    used = {n.id for n in nodes if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    return sorted(used - bound)
+
+
 def lint_candidate(code: str) -> list[str]:
     """Cheap static checks. Returns a list of problems (empty = looks OK)."""
     try:
@@ -335,6 +366,9 @@ def lint_candidate(code: str) -> list[str]:
                 problems.append(f"calls os.{f.attr}")
     if not has_test:
         problems.append("no function named test_* found")
+    undefined = _undefined_names(tree)
+    if undefined:
+        problems.append(f"uses names it never imports or defines: {', '.join(undefined)} (add the imports)")
     return problems
 
 

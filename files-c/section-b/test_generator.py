@@ -169,11 +169,15 @@ def test_unterminated_fence():
     assert "def test_a" in g.extract_code("```python\ndef test_a():\n    assert 1")
 
 
+# Real tests import what they use; the undefined-name rule would flag these otherwise.
+HEAD = "import pytest\nfrom unittest import mock\nfrom app import f\n\n"
+
+
 def test_lint_flags_problems():
     assert g.lint_candidate("def test_a(:\n")[0].startswith("SyntaxError")
     assert "no function" in g.lint_candidate("x = 1")[0]
     assert any("subprocess" in p for p in g.lint_candidate("import subprocess\ndef test_a(): pass"))
-    assert g.lint_candidate("def test_a():\n    assert f() == 1") == []
+    assert g.lint_candidate(HEAD + "def test_a():\n    assert f() == 1") == []
 
 
 NO_ORACLE = "test_a has no assert (constant asserts don't count) or pytest.raises: it checks nothing"
@@ -181,26 +185,79 @@ NO_ORACLE = "test_a has no assert (constant asserts don't count) or pytest.raise
 
 @pytest.mark.parametrize("body", ["    f()\n    assert True", "    assert 1", "    assert 'ok'", "    assert None"])
 def test_lint_rejects_constant_assert(body):
-    assert g.lint_candidate(f"def test_a():\n{body}") == [NO_ORACLE]
+    assert g.lint_candidate(f"{HEAD}def test_a():\n{body}") == [NO_ORACLE]
 
 
 def test_lint_constant_assert_beside_real_one_is_fine():
-    assert g.lint_candidate("def test_a():\n    assert True\n    assert f() == 1") == []
+    assert g.lint_candidate(HEAD + "def test_a():\n    assert True\n    assert f() == 1") == []
 
 
 @pytest.mark.parametrize("body", [
     "    assert f() == 1",
     "    with pytest.raises(ValueError):\n        f()",
-    "    self.assertEqual(f(), 1)",
-    "    m.assert_called_once_with(1)",
+    "    m = mock.Mock()\n    f(m)\n    m.assert_called_once_with(1)",
 ])
 def test_lint_accepts_any_oracle(body):
-    assert g.lint_candidate(f"def test_a():\n{body}") == []
+    assert g.lint_candidate(f"{HEAD}def test_a():\n{body}") == []
+
+
+def test_lint_accepts_unittest_style_assert_method():
+    code = "import unittest\nfrom app import f\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(f(), 1)\n"
+    assert g.lint_candidate(code) == []
 
 
 def test_lint_rejects_test_without_oracle():
-    problems = g.lint_candidate("def test_a():\n    f(1)\n\ndef test_b():\n    assert f(2)")
+    problems = g.lint_candidate(HEAD + "def test_a():\n    f(1)\n\ndef test_b():\n    assert f(2)")
     assert problems == [NO_ORACLE]
+
+
+UNDEFINED = "uses names it never imports or defines: {} (add the imports)"
+
+
+def test_lint_flags_pytest_raises_without_import_pytest():
+    """The eval's most common exception-path failure: NameError: name 'pytest' is not defined."""
+    code = "from textkit import truncate\n\ndef test_a():\n    with pytest.raises(ValueError):\n        truncate('x', 2)\n"
+    assert g.lint_candidate(code) == [UNDEFINED.format("pytest")]
+
+
+def test_lint_flags_code_under_test_never_imported():
+    code = "import pytest\n\ndef test_a():\n    with pytest.raises(ValueError):\n        truncate('x', 2)\n"
+    assert g.lint_candidate(code) == [UNDEFINED.format("truncate")]
+
+
+def test_lint_undefined_names_accepts_local_bindings():
+    code = (
+        "import pytest\n"
+        "def test_a(tmp_path, monkeypatch):\n"
+        "    from inventory import Inventory as Inv\n"
+        "    inv = Inv()\n"
+        "    items = [x for x in range(3) if (y := x) >= 0]\n"
+        "    for i, j in enumerate(items):\n"
+        "        pass\n"
+        "    try:\n"
+        "        raise KeyError(i)\n"
+        "    except KeyError as exc:\n"
+        "        err = exc\n"
+        "    with open(tmp_path / 'f', 'w') as fh:\n"
+        "        fh.write(str(y))\n"
+        "    assert err is not None and inv is not None and j == 2\n"
+    )
+    assert g.lint_candidate(code) == []
+
+
+def test_lint_undefined_names_skipped_with_star_import():
+    assert g.lint_candidate("from app import *\n\ndef test_a():\n    assert f() == 1\n") == []
+
+
+def test_code_context_numbers_lines_and_marks_targets():
+    source = "import os\n\n\ndef f(x):\n    if x:\n        return 1\n    return 2\n"
+    gap = {"file": "m.py", "start_line": 6, "end_line": 6, "function_context": "f", "reason": "uncovered"}
+    assert g.code_context(gap, source).splitlines() == [
+        "   4 | def f(x):",
+        "   5 |     if x:",
+        "   6>|         return 1",
+        "   7 |     return 2",
+    ]
 
 
 def test_module_path_hint():
