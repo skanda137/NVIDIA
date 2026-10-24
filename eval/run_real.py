@@ -8,6 +8,12 @@ on first use; later runs (and the demo) read the cache and never call the
 GitHub API. Stages run separately so a failure gets a class: checkout
 (network), deps (prepare_env), suite (red or timed out in the sandbox),
 coverage mapping, or LLM budget.
+
+--drop-pr-tests: a constructed scenario on real code. After checkout, the PR's
+own test-file changes are reverse-applied and committed in the sandbox, as if
+the PR had shipped without tests; the pipeline then runs on that commit. It
+answers whether 0 gaps on a merged PR means "covered" and gives generator
+evidence on code we did not write. Reported separately, labelled as constructed.
 """
 
 from __future__ import annotations
@@ -62,7 +68,13 @@ def classify(exc: Exception) -> str:
     return f"other ({type(exc).__name__})"
 
 
-def run_one(pr_url: str, work: Path, budget: Budget) -> dict:
+def pr_test_hunks(diff: str) -> str:
+    """The sections of a `diff --git` unified diff that touch test files."""
+    sections = ["diff --git" + s for s in diff.split("diff --git")[1:]]
+    return "".join(s for s in sections if cli.is_test_file(s.split("\n", 1)[0].split(" b/")[-1]))
+
+
+def run_one(pr_url: str, work: Path, budget: Budget, drop_tests: bool = False) -> dict:
     row = {"pr": pr_url, "checkout": "", "deps": "", "suite": "", "gaps": "", "closed": "", "generated": "",
            "reused": "", "exhausted": "", "failure": "", "seconds": 0.0, "detail": ""}
     start = time.monotonic()
@@ -81,6 +93,18 @@ def run_one(pr_url: str, work: Path, budget: Budget) -> dict:
         prepare_env(sb, "repo")
         has_req = sb.run("test -f repo/requirements.txt").ok
         row["deps"] = "ok" + ("" if has_req else " (no requirements.txt: pytest+coverage only)")
+        if drop_tests:
+            stage = "drop-tests"
+            tests = pr_test_hunks(diff)
+            if not tests:
+                raise RuntimeError("the PR changes no test files; nothing to drop")
+            sb.write_file("pr_tests.diff", tests)
+            r = sb.run("cd repo && git apply -R ../pr_tests.diff && git -c user.name=eval -c user.email=eval@example.com "
+                       "commit -q -am 'eval: drop the PR test changes' && git rev-parse HEAD && cd .. && mv repo src")
+            if not r.ok:
+                raise RuntimeError(f"reverting the PR's test changes failed: {r.stderr[-500:]}")
+            sha, clone_url, fetch_ref = r.stdout.split()[-1], str(sb_dir / "src"), None
+            row["detail"] += f"; PR test changes dropped ({tests.count('diff --git')} file(s)), commit {sha[:8]}"
         stage = "pipeline"
         result = run_pipeline(sb, clone_url, sha, diff, changed,
                               config=PipelineConfig(max_attempts_per_gap=MAX_ATTEMPTS, max_gaps=10),
@@ -92,7 +116,7 @@ def run_one(pr_url: str, work: Path, budget: Budget) -> dict:
                    generated=sum(r.final_status == "verified_pass" and r.covered_by is None for r in recs),
                    reused=result.gaps_closed_by_earlier_test,
                    exhausted=sum(r.final_status == "exhausted" for r in recs))
-        report = EVIDENCE / f"real_{sb_dir.name}.md"
+        report = EVIDENCE / f"real_{sb_dir.name}{'_droptests' if drop_tests else ''}.md"
         report.write_text(result.report_markdown)
         row["detail"] += f"; full report: {report.relative_to(ROOT).as_posix()}"
     except Exception as exc:
@@ -111,6 +135,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("pr_urls", nargs="+")
     ap.add_argument("--max-calls", type=int, default=70)
+    ap.add_argument("--drop-pr-tests", action="store_true", help="constructed scenario, see the module docstring")
     args = ap.parse_args()
 
     generator.load_env_file()
@@ -123,7 +148,7 @@ def main() -> None:
     rows = []
     for url in args.pr_urls:
         try:
-            rows.append(run_one(url, work, budget))
+            rows.append(run_one(url, work, budget, args.drop_pr_tests))
         except BudgetExhausted:
             print("STOPPED: call budget reached", file=sys.stderr)
             break
@@ -132,7 +157,9 @@ def main() -> None:
     tok_in, tok_out = budget.totals()
     cmd = "python eval/run_real.py " + " ".join(shlex.quote(a) for a in sys.argv[1:])
     cols = ["pr", "checkout", "deps", "suite", "gaps", "closed", "generated", "reused", "exhausted", "failure", "seconds"]
-    out = [f"# Real public repos, {meta['date']}", "",
+    title = ("Real public repos, PR test changes dropped (constructed scenario)" if args.drop_pr_tests
+             else "Real public repos")
+    out = [f"# {title}, {meta['date']}", "",
            f"Command: `{cmd}`  ",
            f"Commit: `{meta['commit']}`; generator.py sha256 `{meta['generator_sha256']}`  ",
            "Models: " + ", ".join(f"{t} = `{m}`" for t, m in meta["models"].items()) + "  ",
@@ -147,7 +174,7 @@ def main() -> None:
         us = [u for u in budget.usage if u[0] == model]
         out.append(f"| `{model}` | {len(us)} | {sum(u[3] for u in us) / len(us):.1f} | {max(u[3] for u in us):.1f} | "
                    f"{sum(u[1] for u in us) / len(us):.0f} / {sum(u[2] for u in us) / len(us):.0f} |")
-    stem = EVIDENCE / f"real_repos_{meta['date']}.md"
+    stem = EVIDENCE / f"real_repos_{meta['date']}{'_droptests' if args.drop_pr_tests else ''}.md"
     stem.write_text("\n".join(out) + "\n")
     print("\n".join(out))
     print(f"TOTAL: {budget.calls} Token Factory calls, {tok_in} tokens in, {tok_out} out", file=sys.stderr)
