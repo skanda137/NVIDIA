@@ -13,7 +13,7 @@ Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic Engineering 
 | Part | State |
 |---|---|
 | Gap finding + verification (`files-c/section-a`) | Real pytest + coverage; seeded repos and 4 real public repos (see [Results](#results)) |
-| Test generation with Nemotron on Nebius Token Factory (`files-c/section-b`) | Live eval: 3 runs over 87 gap-runs each, plus real repos (see [Results](#results)) |
+| Test generation with Nemotron on Nebius Token Factory (`files-c/section-b`) | Live eval: 3 seeded runs over 87 gap-runs each, a held-out run and real repos (see [Results](#results)) |
 | Orchestration, retry loop, report, CLI (`files-c/section-c`) | `--pr-url`, `--base-ref` and `--diff-file` run live from a fresh clone |
 | Sandbox (`bwrap`) | Read-only root, private `/tmp`, no network, host home and Windows drives hidden; tested |
 
@@ -99,9 +99,42 @@ Runs A and B found two defects in our generator. The model often used `pytest.ra
 without `import pytest`, and the prompt asked for "target lines 22-22" without showing
 line numbers. Both are fixed: an undefined-name lint now feeds the repair round, and the
 context lines are numbered. Run C reruns the same repos the fixes were found on, so its
-numbers are in-sample, not the rate on unseen code. A held-out run has not been done.
+numbers are in-sample, not the rate on unseen code; see the held-out run below.
 Reports: [run A](docs/evidence/eval_2026-10-23_runA.md),
 [run B](docs/evidence/eval_2026-10-24_runB.md), [run C](docs/evidence/eval_2026-10-24_runC.md).
+
+### Held-out repos: 3 repos, 23 gaps, 3 repeats (69 gap-runs)
+
+New code that the generator was never tuned on, run after the fixes at tag
+`eval-heldout` (`0e7f46a`, clean tree). **These repos are not independent.** The same
+agent that diagnosed and fixed the generator wrote them, and knew the failure classes.
+Each repo adds 6-8 functions with no tests and uses a third-party package from
+`requirements.txt`: python-dateutil, requests or humanize.
+
+| | Held-out |
+|---|---|
+| Generated gaps closed | 61/69 (88%) |
+| Closed on attempt 1 (Nano) | 36/69 (52%) |
+| Closed after escalation (Super / Ultra) | 25 (20 / 5) |
+| Exhausted | 8 (12%) |
+| Closed by reuse, no LLM call | 0 |
+| Token Factory calls | 134 |
+
+By repo: ledger 15/21, logscan 23/24, ratefeed 23/24. The exhausted gaps show a failure
+the seeded repos did not. In 7 of the 8, the last attempt used a name the code does not
+define: a dataclass field (`entry.dt`), a constructor keyword, or a class name
+(`RateFeed`). The 8th ended on a date string the code rejects, after an earlier attempt
+also guessed a field name. The prompt shows only the enclosing function, and these
+names are defined outside it. The retries guess again even with the error in the
+prompt: after "no attribute 'date'", Ultra tried `dt`. Six of the 8 are in `ledger`,
+whose methods take an `Entry` dataclass defined elsewhere in the file. We did not change
+the generator after this run.
+
+A fourth repo, `cfgload`, declares its dependency only in `pyproject.toml`. Its suite
+fails in the sandbox with `No module named 'yaml'`, so it has no result
+([probe](docs/evidence/heldout_cfgload_probe_2026-10-24.md)).
+Report: [held-out](docs/evidence/eval_2026-10-24_heldout.md). The repos are rebuilt by
+[eval/heldout/build_heldout.py](eval/heldout/).
 
 ### Real public repos
 
@@ -134,15 +167,21 @@ Reports: [as merged](docs/evidence/real_repos_2026-10-24.md),
 - Linux or WSL2 with bubblewrap only. The venv must live under `$HOME`.
 - Public GitHub repos only for `--pr-url`; the GitHub API is called without auth (60
   requests per hour). Diffs for the demo PRs are cached in `docs/evidence/pr_cache/`.
-- Dependencies from `requirements.txt` are tested (requests, python-dateutil in the
-  seeded repos). Dependencies declared only in `pyproject.toml` are untested; the real
-  repos above have no runtime dependencies.
+- Dependencies are installed from `requirements.txt` only. Tested with requests,
+  python-dateutil and humanize. A dependency declared only in `pyproject.toml` is not
+  installed, and the repo's suite fails (the `cfgload` probe).
+- The prompt shows only the function containing the gap. Classes and fields defined
+  elsewhere in the file are not shown. In 7 of the 8 exhausted held-out gaps, the last
+  attempt guessed such a name wrong.
 - "Verified" means the test passes, executes the gap (takes the missing branch, for a
   partial branch) and has a non-constant assert. It does not mean the test catches every
   bug: a third of mutants survive (see the mutation check).
-- The post-fix eval is in-sample and no held-out eval has been run. Real-repo evidence
-  for test generation is one gap.
+- Run C is in-sample. The held-out repos (88%) were written by the same agent that
+  fixed the generator, not by an independent author. Real-repo evidence for test
+  generation is one gap.
 - The oracle lint would reject human tests that check through a helper function or a
   hand-written `raise AssertionError` (20 of 2204 in the lint-precision run).
 
-More detail: [files-c/README.md](files-c/README.md).
+More detail: [files-c/README.md](files-c/README.md). Submission write-ups:
+[description](docs/submission/DESCRIPTION.md), [feedback on Nebius and NVIDIA
+tools](docs/submission/FEEDBACK.md).

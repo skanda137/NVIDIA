@@ -42,8 +42,8 @@ what would have helped. Only record things we actually saw.
    `max_tokens` budget. Helped: this parameter on the model card and in the
    OpenAI-compatible API docs.
 
-7. **No errors in about 325 sequential calls.** Runs A, B and C made 117, 114 and 90
-   calls; the real repos and a replay made 4 more. We saw no timeouts, 429s or 5xx (0
+7. **No errors in about 460 sequential calls.** Runs A, B and C made 117, 114 and 90
+   calls, the held-out run 134; the real repos and a replay made 4 more. We saw no timeouts, 429s or 5xx (0
    "no response" attempts in any eval CSV). Mean wall time per generated gap, including
    our sandbox runs, was 5.8 s, 7.8 s and 6.1 s. One Nano call with a 2620-token prompt
    took 3.0 s (`docs/evidence/real_repos_2026-10-24_droptests.md`). We did not log
