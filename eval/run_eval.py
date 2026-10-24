@@ -4,6 +4,11 @@ repos from build_repos.py and write docs/evidence/eval_<date>.{md,csv}.
 
     ~/.venvs/vtga/bin/python eval/run_eval.py --repeats 3 --max-calls 180
     ~/.venvs/vtga/bin/python eval/run_eval.py --dry-run    # no LLM: base suites + gaps only
+    ~/.venvs/vtga/bin/python eval/run_eval.py --repos-dir ~/heldout-repos --tag heldout
+
+--repos-dir: every subdirectory is a git repo with exactly two commits (base, then
+head); the PR diff is base..head and the files analysed are its non-test .py files.
+Without it, the seeded repos from build_repos.py are built and used.
 
 Every LLM call goes through Budget: past --max-calls the run aborts (recorded,
 not hidden). A repo whose suite is red or whose deps fail to install is a result.
@@ -31,6 +36,7 @@ sys.path[:0] = [str(ROOT / "eval"), str(ROOT / "files-c" / "section-c")]
 import _paths  # noqa: E402,F401  (section-a and section-b on sys.path)
 import generator  # noqa: E402
 from build_repos import RepoSpec, build_all  # noqa: E402
+from cli import changed_py_files_from_diff  # noqa: E402
 from pipeline_models import PipelineConfig  # noqa: E402
 from run_pipeline import checkout_repo, run_pipeline  # noqa: E402
 from sandbox_client import LocalSandboxClient  # noqa: E402
@@ -73,7 +79,7 @@ class Budget:
         return sum(u[1] for u in self.usage), sum(u[2] for u in self.usage)
 
 
-def run_metadata() -> dict:
+def run_metadata(source: str = "seeded repos") -> dict:
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     # Content changes only: run from WSL on a Windows checkout, every CRLF file
     # otherwise shows as modified (run A on 2026-10-23 was flagged that way).
@@ -85,10 +91,36 @@ def run_metadata() -> dict:
     gen_src = (ROOT / "files-c" / "section-b" / "generator.py").read_bytes()
     return {
         "date": dt.date.today().isoformat(),
+        "source": source,
         "commit": head + (f" (DIRTY: {', '.join(dirty)})" if dirty else " (clean)"),
         "generator_sha256": hashlib.sha256(gen_src).hexdigest()[:12],
         "models": {t: os.getenv(generator._TIER_ENV[t], "") for t in generator.TIERS},
     }
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
+
+
+def load_repos(repos_dir: Path) -> list[RepoSpec]:
+    """One RepoSpec per subdirectory of repos_dir. Each must be a git repo with exactly two
+    commits, base then head; anything else raises (no guessing which commits to diff)."""
+    subdirs = sorted(p for p in repos_dir.iterdir() if p.is_dir())
+    if not subdirs:
+        raise ValueError(f"{repos_dir} has no repo subdirectories")
+    specs = []
+    for repo in subdirs:
+        if not (repo / ".git").exists():
+            raise ValueError(f"{repo} is not a git repo")
+        shas = _git(repo, "rev-list", "--reverse", "HEAD").split()
+        if len(shas) != 2:
+            raise ValueError(f"{repo}: expected exactly 2 commits (base, head), found {len(shas)}")
+        diff = _git(repo, "diff", f"{shas[0]}..{shas[1]}")
+        changed = changed_py_files_from_diff(diff)
+        if not changed:
+            raise ValueError(f"{repo}: base..head changes no non-test .py file")
+        specs.append(RepoSpec(repo.name, str(repo.resolve()), shas[0], shas[1], diff, changed))
+    return specs
 
 
 def categories_for(spec: RepoSpec, gap) -> str:
@@ -188,7 +220,7 @@ def summarize(rows: list[dict], runs: list[dict], budget: Budget, meta: dict, cm
     first = [r for r in gen if r["success_attempt"] == 1]
     rescued = [r for r in gen if r["success_attempt"] in (2, 3)]
     tok_in, tok_out = budget.totals()
-    out = [f"# Eval: seeded repos, {meta['date']}", "",
+    out = [f"# Eval: {meta['source']}, {meta['date']}", "",
            f"Command: `{cmd}`  ",
            f"Commit: `{meta['commit']}`; generator.py sha256 `{meta['generator_sha256']}`  ",
            "Models: " + ", ".join(f"{t} = `{m}`" for t, m in meta["models"].items()) + "  ",
@@ -238,10 +270,12 @@ def main() -> None:
     ap.add_argument("--max-calls", type=int, default=180)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--tag", default="", help="suffix for the output files, e.g. runB")
+    ap.add_argument("--repos-dir", type=Path, default=None,
+                    help="evaluate these two-commit repos instead of the seeded ones (see the module docstring)")
     args = ap.parse_args()
 
     work = Path(tempfile.mkdtemp(prefix="vtga_eval_", dir="/tmp"))
-    specs = build_all(work / "repos")
+    specs = load_repos(args.repos_dir) if args.repos_dir else build_all(work / "repos")
     if args.dry_run:
         dry_run(specs, work)
         return
@@ -250,7 +284,7 @@ def main() -> None:
     missing = generator.missing_env(MAX_ATTEMPTS)
     if missing:
         sys.exit(f"missing {', '.join(missing)}")
-    meta = run_metadata()
+    meta = run_metadata(f"repos in {args.repos_dir}" if args.repos_dir else "seeded repos")
     budget = Budget(args.max_calls)
     rows, runs, details = [], [], []
     try:
