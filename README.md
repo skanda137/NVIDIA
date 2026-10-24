@@ -19,11 +19,22 @@ Built for the Nebius x NVIDIA Global AI Hackathon (Coding & Agentic Engineering 
 
 ## Quick start
 
-Requires Python 3.10+, git and bubblewrap (`sudo apt install bubblewrap`), on Linux or
-WSL2. Every repo and generated-test command runs inside `bwrap`.
+Platform requirements:
+
+- Linux or WSL2 (the sandbox uses Linux user namespaces). Tested on WSL2 Ubuntu with
+  Python 3.14.4, git 2.53, bubblewrap 0.11.1.
+- Python 3.10+ with `venv`, git and bubblewrap. On Debian/Ubuntu:
+  `sudo apt install python3-venv git bubblewrap`. Without `python3-venv`,
+  `python3 -m venv` fails with "ensurepip is not available".
+- Create the venv under your home directory, as below. The sandbox hides `/tmp` and the
+  Windows drives (`/mnt/c`, ...) and re-exposes only a venv under `$HOME`. A `.venv`
+  inside a clone under `/tmp` or `/mnt/c` makes every test run fail with
+  `.venv/bin/python: not found`.
+
+Every repo and generated-test command runs inside `bwrap`.
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
+python3 -m venv ~/.venvs/vtga && . ~/.venvs/vtga/bin/activate
 pip install -r requirements.txt
 python -m pytest -q -p no:cacheprovider files-c
 cd files-c/section-a && python demo.py
