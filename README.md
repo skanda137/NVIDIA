@@ -27,9 +27,9 @@ Platform requirements:
   `sudo apt install python3-venv git bubblewrap`. Without `python3-venv`,
   `python3 -m venv` fails with "ensurepip is not available".
 - Create the venv under your home directory, as below. The sandbox hides `/tmp` and the
-  Windows drives (`/mnt/c`, ...) and re-exposes only a venv under `$HOME`. A `.venv`
-  inside a clone under `/tmp` or `/mnt/c` makes every test run fail with
-  `.venv/bin/python: not found`.
+  Windows drives (`/mnt/c`, ...) and re-exposes only a venv under `$HOME`. With a
+  `.venv` inside a clone under `/tmp` or `/mnt/c`, the sandbox client stops at startup
+  with an error saying so.
 
 Every repo and generated-test command runs inside `bwrap`.
 

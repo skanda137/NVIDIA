@@ -81,6 +81,15 @@ def _under(path: str, root: str) -> bool:
     return os.path.commonpath([path, root]) == root
 
 
+def _hidden_root(path: str) -> str | None:
+    """The sandbox mount that hides `path` (a fresh /tmp, or an emptied Windows drive), or None."""
+    path = os.path.abspath(path)
+    for root in ["/tmp", *sorted(glob.glob("/mnt/?"))]:
+        if _under(path, root):
+            return root
+    return None
+
+
 class LocalSandboxClient:
     """bwrap-isolated subprocess rooted at `cwd` (see the module docstring for
     the mount layout). `ro_paths` are extra host paths made visible read-only,
@@ -93,6 +102,15 @@ class LocalSandboxClient:
             raise RuntimeError("LocalSandboxClient needs Linux; on Windows run it inside WSL")
         if shutil.which("bwrap") is None:
             raise RuntimeError("LocalSandboxClient needs bubblewrap: `sudo apt install bubblewrap`")
+        # verifier.py runs sys.executable inside the sandbox. Under /tmp or /mnt/<drive> it
+        # is masked there, and every command would fail with "python: not found".
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        hidden = _hidden_root(exe_dir)
+        if hidden:
+            raise RuntimeError(
+                f"the Python running this pipeline ({sys.executable}) is under {hidden}, which the "
+                f"sandbox hides, so every test run would fail with 'python: not found'. "
+                f"Create the venv under $HOME instead: python3 -m venv ~/.venvs/vtga")
         self.cwd = os.path.realpath(cwd)
         if self.cwd == "/tmp":
             raise ValueError("cwd must be a directory under /tmp, not /tmp itself")

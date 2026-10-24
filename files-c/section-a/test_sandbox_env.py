@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 from sandbox_client import LocalSandboxClient, scrubbed_env
 
 PLANTED = "planted-fake-value-3f9c1e"
@@ -29,6 +31,34 @@ def test_scrubbed_env_drop_rules(monkeypatch):
 
 # Isolation proofs: the bwrap mounts, not just the env scrub, keep generated code in.
 REPO_ENV = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+
+
+@pytest.mark.parametrize("exe", ["/tmp/clone/.venv/bin/python", "/mnt/c/Users/x/repo/.venv/bin/python"])
+def test_python_hidden_by_sandbox_fails_fast(monkeypatch, tmp_path, exe):
+    """The fresh-clone failure: a .venv inside a clone under /tmp or /mnt/c is masked inside
+    bwrap. The client must refuse up front instead of failing every test run later."""
+    if exe.startswith("/mnt/c") and not os.path.isdir("/mnt/c"):
+        pytest.skip("no /mnt/c on this machine")
+    monkeypatch.setattr(sys, "executable", exe)
+    with pytest.raises(RuntimeError, match=r"under /(tmp|mnt/c), which the sandbox hides.*venv under \$HOME"):
+        LocalSandboxClient(cwd=str(tmp_path))
+
+
+def test_python_under_home_is_accepted(tmp_path):
+    assert sys.executable.startswith(os.path.expanduser("~")), "test suite must run from a venv under $HOME"
+    LocalSandboxClient(cwd=str(tmp_path))
+
+
+def test_hidden_python_really_is_not_found_inside_the_sandbox(tmp_path):
+    """Reproduces the failure the check prevents: an interpreter under /tmp is not there inside bwrap."""
+    fake = tmp_path / "venv" / "bin" / "python"
+    fake.parent.mkdir(parents=True)
+    fake.symlink_to(sys.executable)
+    assert os.path.exists(fake)
+    (tmp_path / "sbx").mkdir()
+    sb = LocalSandboxClient(cwd=str(tmp_path / "sbx"))
+    r = sb.run(f"{fake} -c 'print(1)'")
+    assert not r.ok and "not found" in r.stderr, r.stderr
 
 
 def test_writes_outside_workdir_fail_read_only(tmp_path):
