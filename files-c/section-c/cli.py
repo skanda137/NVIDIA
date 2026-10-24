@@ -6,8 +6,9 @@ this at a real PR instead of the fixture in demo_pipeline.py.
     python3 cli.py --repo-url <git-url-or-path> --ref <head> --base-ref <base>
     python3 cli.py --repo-url <git-url-or-path> --ref <head> --diff-file <pr.diff>
 
---pr-url reads the head SHA, clone URL and diff from the public GitHub REST API
-(no auth: public repos, 60 requests/hour). --base-ref diffs base...ref inside
+--pr-url reads the head SHA and diff from the public GitHub REST API (no auth:
+public repos, 60 requests/hour), clones the upstream repo and fetches the PR's
+pull/<n>/head ref, so a PR from a since-deleted fork still checks out. --base-ref diffs base...ref inside
 the sandbox's clone, so it works for local paths and remote URLs alike.
 
 --changed-files defaults to every .py file the diff adds lines to, minus test
@@ -64,17 +65,17 @@ def _github_get(url: str, accept: str) -> bytes:
         raise RuntimeError(f"GitHub API {url}: HTTP {e.code} {e.reason}") from None
 
 
-def fetch_pr(pr_url: str) -> tuple[str, str, str]:
-    """(clone_url, head_sha, unified diff) of a public GitHub PR."""
+def fetch_pr(pr_url: str) -> tuple[str, str, str, str]:
+    """(upstream clone_url, head_sha, unified diff, fetch_ref) of a public GitHub PR.
+    The upstream repo, not the head fork: GitHub keeps pull/<n>/head there even
+    after the fork is deleted, which is common for merged PRs."""
     m = PR_URL.match(pr_url)
     if not m:
         raise ValueError(f"not a GitHub PR URL: {pr_url} (want https://github.com/<owner>/<repo>/pull/<n>)")
     api = "https://api.github.com/repos/{}/{}/pulls/{}".format(*m.groups())
     pr = json.loads(_github_get(api, "application/vnd.github+json"))
-    if pr["head"]["repo"] is None:
-        raise ValueError(f"{pr_url}: the PR's head repository was deleted, nothing to clone")
     diff = _github_get(api, "application/vnd.github.diff").decode("utf-8")
-    return pr["head"]["repo"]["clone_url"], pr["head"]["sha"], diff
+    return pr["base"]["repo"]["clone_url"], pr["head"]["sha"], diff, f"pull/{m.group(3)}/head"
 
 
 def diff_from_base_ref(sandbox, repo_path: str, repo_url: str, ref: str, base_ref: str) -> str:
@@ -134,8 +135,9 @@ def main() -> None:
     ro_paths = [args.repo_url] if args.repo_url and os.path.isdir(args.repo_url) else []
     sandbox = LocalSandboxClient(cwd=args.sandbox_cwd, ro_paths=ro_paths)
 
+    fetch_ref = None
     if args.pr_url:
-        args.repo_url, args.ref, diff = fetch_pr(args.pr_url)
+        args.repo_url, args.ref, diff, fetch_ref = fetch_pr(args.pr_url)
         print(f"PR head {args.ref[:8]} from {args.repo_url}", file=sys.stderr)
     elif args.base_ref:
         diff = diff_from_base_ref(sandbox, args.repo_path, args.repo_url, args.ref, args.base_ref)
@@ -159,6 +161,7 @@ def main() -> None:
         repo_path=args.repo_path,
         install_deps=args.install_deps,
         generate=generate,
+        fetch_ref=fetch_ref,
     )
 
     if args.output:

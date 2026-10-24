@@ -35,20 +35,20 @@ from verifier import prepare_env  # noqa: E402
 CACHE = EVIDENCE / "pr_cache"
 
 
-def cached_pr(pr_url: str) -> tuple[str, str, str]:
-    """(clone_url, head_sha, diff), from the cache or the GitHub API (then cached)."""
+def cached_pr(pr_url: str) -> tuple[str, str, str, str]:
+    """(upstream clone_url, head_sha, diff, fetch_ref), from the cache or the GitHub API (then cached)."""
     m = cli.PR_URL.match(pr_url)
     if not m:
         raise ValueError(f"not a GitHub PR URL: {pr_url}")
     stem = CACHE / "__".join(m.groups())
     if not stem.with_suffix(".json").is_file():
-        clone_url, sha, diff = cli.fetch_pr(pr_url)
+        clone_url, sha, diff, fetch_ref = cli.fetch_pr(pr_url)
         CACHE.mkdir(parents=True, exist_ok=True)
-        stem.with_suffix(".json").write_text(json.dumps({"pr_url": pr_url, "clone_url": clone_url, "head_sha": sha},
-                                                        indent=2) + "\n")
+        stem.with_suffix(".json").write_text(json.dumps({"pr_url": pr_url, "clone_url": clone_url, "head_sha": sha,
+                                                         "fetch_ref": fetch_ref}, indent=2) + "\n")
         stem.with_suffix(".diff").write_text(diff)
     meta = json.loads(stem.with_suffix(".json").read_text())
-    return meta["clone_url"], meta["head_sha"], stem.with_suffix(".diff").read_text()
+    return meta["clone_url"], meta["head_sha"], stem.with_suffix(".diff").read_text(), meta["fetch_ref"]
 
 
 def classify(exc: Exception) -> str:
@@ -68,14 +68,14 @@ def run_one(pr_url: str, work: Path, budget: Budget) -> dict:
     start = time.monotonic()
     stage = "fetch"
     try:
-        clone_url, sha, diff = cached_pr(pr_url)
+        clone_url, sha, diff, fetch_ref = cached_pr(pr_url)
         changed = cli.changed_py_files_from_diff(diff)
         row["detail"] = f"head {sha[:8]}; non-test .py files in diff: {', '.join(changed) or 'none'}"
         sb_dir = work / re.sub(r"\W+", "_", pr_url.split("github.com/")[1])
         sb_dir.mkdir(parents=True)
         sb = LocalSandboxClient(cwd=str(sb_dir))
         stage = "checkout"
-        checkout_repo(sb, "repo", clone_url, sha)
+        checkout_repo(sb, "repo", clone_url, sha, fetch_ref)
         row["checkout"] = "ok"
         stage = "deps"
         prepare_env(sb, "repo")
@@ -84,7 +84,7 @@ def run_one(pr_url: str, work: Path, budget: Budget) -> dict:
         stage = "pipeline"
         result = run_pipeline(sb, clone_url, sha, diff, changed,
                               config=PipelineConfig(max_attempts_per_gap=MAX_ATTEMPTS, max_gaps=10),
-                              repo_path="repo", install_deps=False, generate=budget.generate)
+                              repo_path="repo", install_deps=False, generate=budget.generate, fetch_ref=fetch_ref)
         row["suite"] = "green"
         recs = result.records
         row.update(gaps=result.gaps_found,

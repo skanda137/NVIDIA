@@ -17,6 +17,7 @@ import argparse
 import csv
 import datetime as dt
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -74,11 +75,17 @@ class Budget:
 
 def run_metadata() -> dict:
     head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    dirty = subprocess.run(["git", "status", "--porcelain", "files-c"], cwd=ROOT, capture_output=True, text=True).stdout
+    # Content changes only: run from WSL on a Windows checkout, every CRLF file
+    # otherwise shows as modified (run A on 2026-10-23 was flagged that way).
+    changed = subprocess.run(["git", "diff", "--ignore-cr-at-eol", "--name-only", "HEAD", "--", "files-c", "eval"],
+                             cwd=ROOT, capture_output=True, text=True).stdout
+    untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "files-c", "eval"],
+                               cwd=ROOT, capture_output=True, text=True).stdout
+    dirty = (changed + untracked).split()
     gen_src = (ROOT / "files-c" / "section-b" / "generator.py").read_bytes()
     return {
         "date": dt.date.today().isoformat(),
-        "commit": head + (" (files-c modified)" if dirty.strip() else ""),
+        "commit": head + (f" (DIRTY: {', '.join(dirty)})" if dirty else " (clean)"),
         "generator_sha256": hashlib.sha256(gen_src).hexdigest()[:12],
         "models": {t: os.getenv(generator._TIER_ENV[t], "") for t in generator.TIERS},
     }
@@ -130,6 +137,15 @@ def dry_run(specs: list[RepoSpec], work: Path) -> None:
 
 FIELDS = ["repo", "repeat", "gap", "kind", "category", "outcome", "attempts_used", "tiers",
           "success_tier", "success_attempt", "llm_calls", "tokens_in", "tokens_out", "seconds", "last_failure"]
+
+
+def gap_detail(spec: RepoSpec, repeat: int, r) -> dict:
+    """Every attempt's code and verdict for one gap, for the JSONL (and sample_verified.py)."""
+    return {"repo": spec.name, "repeat": repeat, "file": r.gap.file, "start_line": r.gap.start_line,
+            "end_line": r.gap.end_line, "reason": r.gap.reason, "category": categories_for(spec, r.gap),
+            "final_status": r.final_status, "covered_by": str(r.covered_by) if r.covered_by else None,
+            "attempts": [{"tier": a.model_tier_used, "code": a.code, "status": v.status, "verified": v.verified,
+                          "message": v.message} for a, v in zip(r.attempts, r.verifications)]}
 
 
 def gap_rows(spec: RepoSpec, repeat: int, result, budget: Budget) -> list[dict]:
@@ -221,6 +237,7 @@ def main() -> None:
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--max-calls", type=int, default=180)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--tag", default="", help="suffix for the output files, e.g. runB")
     args = ap.parse_args()
 
     work = Path(tempfile.mkdtemp(prefix="vtga_eval_", dir="/tmp"))
@@ -235,7 +252,7 @@ def main() -> None:
         sys.exit(f"missing {', '.join(missing)}")
     meta = run_metadata()
     budget = Budget(args.max_calls)
-    rows, runs = [], []
+    rows, runs, details = [], [], []
     try:
         for repeat in range(1, args.repeats + 1):
             for spec in specs:
@@ -256,6 +273,7 @@ def main() -> None:
                     continue
                 new = gap_rows(spec, repeat, result, budget)
                 rows += new
+                details += [gap_detail(spec, repeat, r) for r in result.records]
                 runs.append({"repo": spec.name, "repeat": repeat, "result": "ok", "gaps": len(new),
                              "seconds": result.duration_seconds})
                 print(f"{spec.name} r{repeat}: {sum(r['outcome'].startswith('closed') for r in new)}/{len(new)} "
@@ -264,7 +282,9 @@ def main() -> None:
         print(f"STOPPED: {exc}", file=sys.stderr)
 
     EVIDENCE.mkdir(parents=True, exist_ok=True)
-    stem = EVIDENCE / f"eval_{meta['date']}"
+    stem = EVIDENCE / f"eval_{meta['date']}" if not args.tag else EVIDENCE / f"eval_{meta['date']}_{args.tag}"
+    with open(f"{stem}.jsonl", "w") as f:
+        f.writelines(json.dumps(d) + "\n" for d in details)
     with open(f"{stem}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()

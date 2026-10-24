@@ -48,15 +48,19 @@ from verifier import find_gaps, prepare_env, verify_test
 TRANSIENT_LLM_ERRORS = (openai.APITimeoutError, openai.RateLimitError)
 
 
-def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: str) -> None:
+def checkout_repo(sandbox: SandboxClient, repo_path: str, repo_url: str, ref: str,
+                  fetch_ref: str | None = None) -> None:
     """Clone + checkout the PR head inside the sandbox. find_gaps() assumes
     this has already happened -- see verifier.py's docstring. The one step
-    besides prepare_env() that runs with network (a remote repo_url)."""
+    besides prepare_env() that runs with network (a remote repo_url).
+    fetch_ref: fetched from origin before the checkout, for a ref a plain clone
+    does not bring along (a GitHub PR's `pull/<n>/head`)."""
     # rm -rf first: a rerun into the same sandbox otherwise fails with
     # "destination path already exists" (audit R6/E7).
     path, url, rev = shlex.quote(repo_path), shlex.quote(repo_url), shlex.quote(ref)
+    fetch = f"git fetch --quiet origin {shlex.quote(fetch_ref)} && " if fetch_ref else ""
     result = sandbox.run(f"rm -rf {path} && git clone --quiet {url} {path} "
-                         f"&& cd {path} && git checkout --quiet {rev}", network=True)
+                         f"&& cd {path} && {fetch}git checkout --quiet {rev}", network=True)
     if not result.ok:
         raise RuntimeError(f"failed to check out {repo_url}@{ref} into sandbox:\n{result.stderr[-2000:]}")
 
@@ -158,6 +162,7 @@ def run_pipeline(
     repo_path: str = "checked_out_repo",
     install_deps: bool = False,
     generate: Callable[..., CandidateTest] = generate_test,
+    fetch_ref: str | None = None,
 ) -> PipelineResult:
     """
     Entry point. repo_url/ref are used to check the PR head out inside the
@@ -168,12 +173,13 @@ def run_pipeline(
     install_deps: run verifier.prepare_env() after checkout (pip-installs pytest,
     coverage and requirements.txt into the sandbox workdir, with network).
     example_tests: None = collect up to 3 test_*.py files from the checked-out repo.
+    fetch_ref: passed to checkout_repo (a PR's `pull/<n>/head`).
     generate: Section 2's generate_test, or anything with its signature.
     """
     config = config or PipelineConfig()
     start = time.monotonic()
 
-    checkout_repo(sandbox, repo_path, repo_url, ref)
+    checkout_repo(sandbox, repo_path, repo_url, ref, fetch_ref)
     if install_deps:
         prepare_env(sandbox, repo_path)
     if example_tests is None:

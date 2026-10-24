@@ -1,5 +1,6 @@
 {
   "pr_url": "https://github.com/andialbrecht/sqlparse/pull/865",
-  "clone_url": "https://github.com/chuenchen309/sqlparse.git",
-  "head_sha": "b4835c451720119b5664e012d0d7fdfaeab5c2a4"
+  "clone_url": "https://github.com/andialbrecht/sqlparse.git",
+  "head_sha": "b4835c451720119b5664e012d0d7fdfaeab5c2a4",
+  "fetch_ref": "pull/865/head"
 }
